@@ -5,7 +5,8 @@ import { MOVE, ATTACK, RANGED_ATTACK, WORK, CARRY, RESOURCE_ENERGY, ERR_NOT_IN_R
 let creepPaths = {}; // Cache paths: { creepId: { target: targetId, tick: lastCalculatedTick } }
 let targetWall = null; // Wall blocking access to containers
 let deployedAttackers = new Set(); // Track which attackers are deployed to attack
-let firstWaveLaunched = false; // Track if initial wave of 5 has launched
+let deployedMedics = new Set(); // Track which medics are deployed for combat support
+let waveNumber = 0; // Track which wave we're on
 
 /**
  * Spawn and Swamp Dominator
@@ -97,7 +98,7 @@ export function loop() {
     const enemySpawn = getObjectsByPrototype(StructureSpawn).find(s => !s.my);
     const myCreeps = getObjectsByPrototype(Creep).filter(c => c.my);
 
-    // Clean up path cache and deployed attackers set for dead creeps
+    // Clean up path cache and deployed sets for dead creeps
     const aliveCreepIds = new Set(myCreeps.map(c => c.id));
     for (const creepId in creepPaths) {
         if (!aliveCreepIds.has(creepId)) {
@@ -107,6 +108,11 @@ export function loop() {
     for (const creepId of deployedAttackers) {
         if (!aliveCreepIds.has(creepId)) {
             deployedAttackers.delete(creepId);
+        }
+    }
+    for (const creepId of deployedMedics) {
+        if (!aliveCreepIds.has(creepId)) {
+            deployedMedics.delete(creepId);
         }
     }
 
@@ -147,22 +153,35 @@ export function loop() {
 
     // Deploy attack waves
     const undeployedAttackers = attackers.filter(a => !deployedAttackers.has(a.id));
+    const undeployedMedics = defenders.filter(d => !deployedMedics.has(d.id));
 
-    if (!firstWaveLaunched && attackers.length >= 5) {
-        // Launch initial wave of 5
+    if (waveNumber === 0 && attackers.length >= 5) {
+        // Wave 1: Initial wave of 5 attackers
         for (const attacker of attackers) {
             deployedAttackers.add(attacker.id);
         }
-        firstWaveLaunched = true;
-    } else if (firstWaveLaunched && undeployedAttackers.length >= 3) {
-        // Launch subsequent waves of 3
+        waveNumber = 1;
+    } else if (waveNumber === 1 && undeployedAttackers.length >= 3) {
+        // Wave 2: 3 attackers
+        for (let i = 0; i < 3 && i < undeployedAttackers.length; i++) {
+            deployedAttackers.add(undeployedAttackers[i].id);
+        }
+        waveNumber = 2;
+    } else if (waveNumber === 2 && undeployedMedics.length >= 2) {
+        // Wave 3: 2 medics for combat support
+        for (let i = 0; i < 2 && i < undeployedMedics.length; i++) {
+            deployedMedics.add(undeployedMedics[i].id);
+        }
+        waveNumber = 3;
+    } else if (waveNumber >= 3 && undeployedAttackers.length >= 3) {
+        // Wave 4+: Continue with 3 attackers per wave
         for (let i = 0; i < 3 && i < undeployedAttackers.length; i++) {
             deployedAttackers.add(undeployedAttackers[i].id);
         }
     }
 
     // Build defenses after initial wave
-    if (firstWaveLaunched) {
+    if (waveNumber >= 1) {
         const towers = getObjectsByPrototype(StructureTower).filter(t => t.my);
         const constructionSites = getObjectsByPrototype(ConstructionSite).filter(s => s.my);
 
@@ -255,30 +274,58 @@ export function loop() {
                 }
             }
         } else if (isDefender) {
-            // Defender: active defense - heal friendlies and attack enemies in base area
-            const damagedCreep = myCreeps.find(c => c.hits < c.hitsMax);
+            const isDeployedMedic = deployedMedics.has(creep.id);
 
-            if (damagedCreep) {
-                // Priority 1: Heal damaged friendlies
-                if (creep.heal(damagedCreep) === ERR_NOT_IN_RANGE) {
-                    cachedMoveTo(creep, damagedCreep);
-                }
-            } else {
-                // Priority 2: Attack enemies near base (within 5 tiles of spawn)
-                const enemyCreeps = getObjectsByPrototype(Creep).filter(c => !c.my);
-                const baseThreats = enemyCreeps.filter(e => e.getRangeTo(mySpawn) <= 5);
+            if (isDeployedMedic && enemySpawn) {
+                // Deployed combat medic: follow assault force and heal wounded
+                const damagedAttacker = myCreeps.filter(c =>
+                    c.hits < c.hitsMax &&
+                    (deployedAttackers.has(c.id) || deployedMedics.has(c.id))
+                ).sort((a, b) => a.hits - b.hits)[0];
 
-                if (baseThreats.length > 0) {
-                    const closestThreat = creep.findClosestByRange(baseThreats);
-                    if (closestThreat) {
-                        if (creep.attack(closestThreat) === ERR_NOT_IN_RANGE) {
-                            cachedMoveTo(creep, closestThreat);
-                        }
+                if (damagedAttacker) {
+                    // Heal wounded assault creeps
+                    if (creep.heal(damagedAttacker) === ERR_NOT_IN_RANGE) {
+                        cachedMoveTo(creep, damagedAttacker, { ignoreCreeps: true });
                     }
                 } else {
-                    // Stay near spawn
-                    if (creep.getRangeTo(mySpawn) > 3) {
-                        cachedMoveTo(creep, mySpawn);
+                    // No wounded, follow the assault force toward enemy spawn
+                    const nearestAttacker = creep.findClosestByRange(
+                        myCreeps.filter(c => deployedAttackers.has(c.id))
+                    );
+                    if (nearestAttacker && creep.getRangeTo(nearestAttacker) > 2) {
+                        cachedMoveTo(creep, nearestAttacker, { ignoreCreeps: true });
+                    } else {
+                        // Push with the force
+                        cachedMoveTo(creep, enemySpawn, { ignoreCreeps: true });
+                    }
+                }
+            } else {
+                // Base defender: heal friendlies and attack enemies in base area
+                const damagedCreep = myCreeps.find(c => c.hits < c.hitsMax);
+
+                if (damagedCreep) {
+                    // Priority 1: Heal damaged friendlies
+                    if (creep.heal(damagedCreep) === ERR_NOT_IN_RANGE) {
+                        cachedMoveTo(creep, damagedCreep);
+                    }
+                } else {
+                    // Priority 2: Attack enemies near base (within 5 tiles of spawn)
+                    const enemyCreeps = getObjectsByPrototype(Creep).filter(c => !c.my);
+                    const baseThreats = enemyCreeps.filter(e => e.getRangeTo(mySpawn) <= 5);
+
+                    if (baseThreats.length > 0) {
+                        const closestThreat = creep.findClosestByRange(baseThreats);
+                        if (closestThreat) {
+                            if (creep.attack(closestThreat) === ERR_NOT_IN_RANGE) {
+                                cachedMoveTo(creep, closestThreat);
+                            }
+                        }
+                    } else {
+                        // Stay near spawn
+                        if (creep.getRangeTo(mySpawn) > 3) {
+                            cachedMoveTo(creep, mySpawn);
+                        }
                     }
                 }
             }
