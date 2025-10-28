@@ -1,6 +1,6 @@
 import { getObjectsByPrototype, createConstructionSite, getTicks, findPath, getDirection } from 'game/utils';
 import { Creep, StructureSpawn, Source, StructureContainer, StructureTower, ConstructionSite, StructureExtension, StructureWall } from 'game/prototypes';
-import { MOVE, ATTACK, RANGED_ATTACK, WORK, CARRY, RESOURCE_ENERGY, ERR_NOT_IN_RANGE, HEAL } from 'game/constants';
+import { MOVE, ATTACK, RANGED_ATTACK, WORK, CARRY, RESOURCE_ENERGY, ERR_NOT_IN_RANGE, HEAL, TOUGH } from 'game/constants';
 
 let creepPaths = {}; // Cache paths: { creepId: { target: targetId, tick: lastCalculatedTick } }
 let targetWall = null; // Wall blocking access to containers
@@ -13,7 +13,7 @@ let waveNumber = 0; // Track which wave we're on
  */
 
 // Configuration Constants
-const PATH_REFRESH_INTERVAL = 6; // Recalculate path every 6 ticks
+const PATH_REFRESH_INTERVAL = 5; // Recalculate path every 5 ticks
 const OFFPATH_DETECTION_THRESHOLD = 2; // Max tiles away from expected path position
 
 // Extension Construction
@@ -21,18 +21,18 @@ const MIN_HARVESTERS_FOR_EXTENSIONS = 1;
 const MAX_EXTENSIONS = 5;
 
 // Wave Deployment Sizes
-const WAVE_1_SIZE = 5; // Initial assault wave
-const WAVE_2_SIZE = 3; // Second wave
+const WAVE_1_SIZE = 4; // Initial assault wave
+const WAVE_2_SIZE = 2; // Second wave
 const WAVE_3_MEDIC_SIZE = 2; // Combat medic deployment
-const WAVE_4_PLUS_SIZE = 3; // Subsequent waves
+const WAVE_4_PLUS_SIZE = 2; // Subsequent waves
 
 // Unit Production Targets
 const TARGET_HARVESTER_COUNT = 3;
-const TARGET_INITIAL_ATTACKER_COUNT = 10;
-const TARGET_MEDIC_COUNT = 5;
+const TARGET_INITIAL_ATTACKER_COUNT = 6;
+const TARGET_MEDIC_COUNT = 4;
 
 // Combat and Defense Ranges
-const BASE_THREAT_DETECTION_RANGE = 5; // Range to detect enemies near base
+const BASE_THREAT_DETECTION_RANGE = 340; // Range to detect enemies near base
 const DEFENDER_IDLE_RANGE = 3; // Distance from spawn for idle defenders
 const ATTACKER_ENEMY_DETECTION_RANGE = 5; // Range for attackers to detect enemies
 const MEDIC_FOLLOW_RANGE = 2; // Max range before medic moves to follow assault force
@@ -266,13 +266,13 @@ function executeSpawnStrategy(mySpawn, harvesters, attackers, medics) {
             mySpawn.spawnCreep([CARRY, CARRY, MOVE, MOVE]);
         } else if (attackers.length < TARGET_INITIAL_ATTACKER_COUNT) {
             // Phase 2: Initial attack wave
-            mySpawn.spawnCreep([MOVE, MOVE, ATTACK, ATTACK]);
+            mySpawn.spawnCreep([TOUGH, TOUGH, MOVE, MOVE, ATTACK, ATTACK]);
         } else if (medics.length < TARGET_MEDIC_COUNT) {
             // Phase 3: Combat medics
-            mySpawn.spawnCreep([MOVE, HEAL]);
+            mySpawn.spawnCreep([MOVE, MOVE, HEAL, HEAL]);
         } else {
             // Phase 4: Continue offense
-            mySpawn.spawnCreep([MOVE, MOVE, ATTACK, ATTACK]);
+            mySpawn.spawnCreep([TOUGH, TOUGH, MOVE, MOVE, ATTACK, ATTACK]);
         }
     }
 }
@@ -413,9 +413,10 @@ function runMedicBehavior(creep, mySpawn, myCreeps, enemySpawn) {
 /**
  * Run attacker creep behavior
  * @param {Creep} creep - The attacker creep
+ * @param {StructureSpawn} mySpawn - The friendly spawn
  * @param {StructureSpawn} enemySpawn - The enemy spawn
  */
-function runAttackerBehavior(creep, enemySpawn) {
+function runAttackerBehavior(creep, mySpawn, enemySpawn) {
     const isDeployed = deployedAttackers.has(creep.id);
 
     if (isDeployed && enemySpawn) {
@@ -432,10 +433,16 @@ function runAttackerBehavior(creep, enemySpawn) {
             cachedMoveTo(creep, enemySpawn, { ignoreCreeps: true });
             creep.attack(enemySpawn);
         }
-    } else if (targetWall) {
-        // Undeployed attacker: demolish wall blocking containers while waiting for wave
-        if (creep.attack(targetWall) === ERR_NOT_IN_RANGE) {
-            cachedMoveTo(creep, targetWall, { ignoreCreeps: true });
+    } else {
+        // Undeployed attacker: wait near spawn without blocking harvester paths
+        // Attack wall if in range, but don't move to it to avoid blocking
+        if (targetWall && creep.getRangeTo(targetWall) === 1) {
+            creep.attack(targetWall);
+        }
+
+        // Stay near spawn while waiting for deployment
+        if (creep.getRangeTo(mySpawn) > DEFENDER_IDLE_RANGE) {
+            cachedMoveTo(creep, mySpawn);
         }
     }
 }
@@ -484,7 +491,7 @@ export function loop() {
         } else if (isMedic) {
             runMedicBehavior(creep, mySpawn, myCreeps, enemySpawn);
         } else {
-            runAttackerBehavior(creep, enemySpawn);
+            runAttackerBehavior(creep, mySpawn, enemySpawn);
         }
     }
 
