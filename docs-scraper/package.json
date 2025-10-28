@@ -1,0 +1,12 @@
+{
+  "name": "screeps-arena-docs-scraper",
+  "version": "1.0.0",
+  "description": "A script to download and archive Screeps Arena documentation",
+  "main": "scrape.js",
+  "scripts": {
+    "scrape": "node scrape.js"
+  },
+  "keywords": ["screeps", "documentation", "scraper"],
+  "author": "",
+  "license": "MIT"
+}
