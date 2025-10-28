@@ -11,7 +11,7 @@ let firstWaveLaunched = false; // Track if initial wave of 5 has launched
  * Spawn and Swamp Dominator
  */
 
-const PATH_REFRESH_INTERVAL = 10; // Recalculate path every 10 ticks
+const PATH_REFRESH_INTERVAL = 6; // Recalculate path every 10 ticks
 
 /**
  * Find nearest enemy creep within specified range
@@ -38,21 +38,37 @@ function findNearestEnemy(creep, maxRange) {
 
 /**
  * Move creep to target with path caching to avoid constant rerouting
+ * @param {Creep} creep - The creep to move
+ * @param {object} target - The target object or position
+ * @param {object} opts - Optional pathfinding options (e.g., { ignoreCreeps: true })
  */
-function cachedMoveTo(creep, target) {
+function cachedMoveTo(creep, target, opts = {}) {
     const tick = getTicks();
     const targetId = target.id || `${target.x},${target.y}`;
     const pathCache = creepPaths[creep.id];
+
+    // Check if creep is at expected position in cached path
+    const isAtExpectedPosition = pathCache &&
+                                  pathCache.pathIndex > 0 &&
+                                  pathCache.pathIndex < pathCache.path.length &&
+                                  pathCache.path[pathCache.pathIndex - 1].x === creep.x &&
+                                  pathCache.path[pathCache.pathIndex - 1].y === creep.y;
 
     // Check if we need to recalculate path
     const needsNewPath = !pathCache ||
                          pathCache.target !== targetId ||
                          tick - pathCache.tick >= PATH_REFRESH_INTERVAL ||
-                         pathCache.pathIndex >= pathCache.path.length;
+                         pathCache.pathIndex >= pathCache.path.length ||
+                         !isAtExpectedPosition;
 
     if (needsNewPath) {
-        // Calculate new path
-        const path = findPath(creep, target);
+        // Calculate new path with options
+        const path = findPath(creep, target, opts);
+
+        if (!path || path.length === 0) {
+            return; // No valid path found
+        }
+
         creepPaths[creep.id] = {
             target: targetId,
             tick: tick,
@@ -67,7 +83,11 @@ function cachedMoveTo(creep, target) {
         const nextStep = cache.path[cache.pathIndex];
         const direction = getDirection(nextStep.x - creep.x, nextStep.y - creep.y);
         creep.move(direction);
-        cache.pathIndex++;
+
+        // Only increment path index if creep has reached the current step
+        if (creep.x === nextStep.x && creep.y === nextStep.y) {
+            cache.pathIndex++;
+        }
     }
 }
 
