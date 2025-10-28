@@ -6,7 +6,15 @@ let creepPaths = {}; // Cache paths: { creepId: { target: targetId, tick: lastCa
 let targetWall = null; // Wall blocking access to containers
 let deployedAttackers = new Set(); // Track which attackers are deployed to attack
 let deployedMedics = new Set(); // Track which medics are deployed for combat support
-let waveNumber = 0; // Track which wave we're on
+let squadAssignments = {}; // Map creep ID to squad name (e.g., "Alpha", "Bravo", "Charlie")
+let nextSquadIndex = 0; // Track next squad to deploy
+
+// NATO alphabet for squad naming
+const NATO_ALPHABET = [
+    "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel",
+    "India", "Juliet", "Kilo", "Lima", "Mike", "November", "Oscar", "Papa",
+    "Quebec", "Romeo", "Sierra", "Tango", "Uniform", "Victor", "Whiskey", "Xray", "Yankee", "Zulu"
+];
 
 /**
  * Spawn and Swamp Dominator
@@ -20,15 +28,12 @@ const OFFPATH_DETECTION_THRESHOLD = 2; // Max tiles away from expected path posi
 const MIN_HARVESTERS_FOR_EXTENSIONS = 1;
 const MAX_EXTENSIONS = 5;
 
-// Wave Deployment Sizes
-const WAVE_1_SIZE = 4; // Initial assault wave (3 attackers + 1 medic)
-const WAVE_2_PLUS_SIZE = 2; // Subsequent waves (attackers only)
+// Squad Composition
+const ATTACKERS_PER_SQUAD = 3;
+const MEDICS_PER_SQUAD = 1;
 
 // Unit Production Targets
 const TARGET_HARVESTER_COUNT = 3;
-const TARGET_INITIAL_ATTACKER_COUNT = 3;
-const TARGET_INITIAL_MEDIC_COUNT = 1;
-const TARGET_MEDIC_COUNT = 1; // Only 1 medic per squad
 
 // Combat and Defense Ranges
 const BASE_THREAT_DETECTION_RANGE = 40; // Range to detect enemies near base
@@ -164,6 +169,13 @@ function cleanupDeadCreepState(myCreeps) {
             deployedMedics.delete(creepId);
         }
     }
+
+    // Clean up squad assignments
+    for (const creepId in squadAssignments) {
+        if (!aliveCreepIds.has(creepId)) {
+            delete squadAssignments[creepId];
+        }
+    }
 }
 
 /**
@@ -201,7 +213,7 @@ function manageExtensionConstruction(mySpawn, harvesters) {
 }
 
 /**
- * Deploy attack waves progressively
+ * Deploy complete squads with NATO alphabet naming
  * @param {Creep[]} attackers - Array of attacker creeps
  * @param {Creep[]} medics - Array of medic creeps
  */
@@ -209,29 +221,34 @@ function deployAttackWaves(attackers, medics) {
     const undeployedAttackers = attackers.filter(a => !deployedAttackers.has(a.id));
     const undeployedMedics = medics.filter(d => !deployedMedics.has(d.id));
 
-    if (waveNumber === 0 && attackers.length >= 3 && medics.length >= 1) {
-        // Wave 1: Initial assault squad - 3 attackers + 1 medic
-        for (let i = 0; i < 3 && i < attackers.length; i++) {
-            deployedAttackers.add(attackers[i].id);
+    // Deploy complete squads only when we have enough units
+    if (undeployedAttackers.length >= ATTACKERS_PER_SQUAD && undeployedMedics.length >= MEDICS_PER_SQUAD) {
+        const squadName = NATO_ALPHABET[nextSquadIndex % NATO_ALPHABET.length];
+
+        // Deploy attackers
+        for (let i = 0; i < ATTACKERS_PER_SQUAD; i++) {
+            const attacker = undeployedAttackers[i];
+            deployedAttackers.add(attacker.id);
+            squadAssignments[attacker.id] = squadName;
         }
-        for (let i = 0; i < 1 && i < medics.length; i++) {
-            deployedMedics.add(medics[i].id);
+
+        // Deploy medics
+        for (let i = 0; i < MEDICS_PER_SQUAD; i++) {
+            const medic = undeployedMedics[i];
+            deployedMedics.add(medic.id);
+            squadAssignments[medic.id] = squadName;
         }
-        waveNumber = 1;
-    } else if (waveNumber >= 1 && undeployedAttackers.length >= WAVE_2_PLUS_SIZE) {
-        // Wave 2+: Deploy additional attackers as they become available
-        for (let i = 0; i < WAVE_2_PLUS_SIZE && i < undeployedAttackers.length; i++) {
-            deployedAttackers.add(undeployedAttackers[i].id);
-        }
+
+        nextSquadIndex++;
     }
 }
 
 /**
- * Build defenses after initial wave deployment
+ * Build defenses after initial squad deployment
  * @param {StructureSpawn} mySpawn - The friendly spawn
  */
 function manageBuildDefenses(mySpawn) {
-    if (waveNumber >= 1) {
+    if (nextSquadIndex >= 1) {
         const towers = getObjectsByPrototype(StructureTower).filter(t => t.my);
         const constructionSites = getObjectsByPrototype(ConstructionSite).filter(s => s.my);
 
@@ -252,17 +269,20 @@ function manageBuildDefenses(mySpawn) {
 function executeSpawnStrategy(mySpawn, harvesters, attackers, medics) {
     if (mySpawn && !mySpawn.spawning) {
         if (harvesters.length < TARGET_HARVESTER_COUNT) {
-            // Phase 1: Harvesters
+            // Phase 1: Build economy with harvesters
             mySpawn.spawnCreep([CARRY, CARRY, MOVE, MOVE]);
-        } else if (attackers.length < TARGET_INITIAL_ATTACKER_COUNT) {
-            // Phase 2: Initial attackers (3 for wave 1) - enhanced with more attack and move
-            mySpawn.spawnCreep([TOUGH, TOUGH, MOVE, MOVE, MOVE, ATTACK, ATTACK, ATTACK]);
-        } else if (medics.length < TARGET_MEDIC_COUNT) {
-            // Phase 3: Squad medic (1 per squad)
-            mySpawn.spawnCreep([MOVE, MOVE, HEAL, HEAL]);
         } else {
-            // Phase 4: Continue offense - enhanced with more attack and move
-            mySpawn.spawnCreep([TOUGH, TOUGH, MOVE, MOVE, MOVE, ATTACK, ATTACK, ATTACK]);
+            // Phase 2: Build squads - maintain ratio of 3 attackers per 1 medic
+            const undeployedAttackers = attackers.filter(a => !deployedAttackers.has(a.id));
+            const undeployedMedics = medics.filter(m => !deployedMedics.has(m.id));
+
+            if (undeployedAttackers.length >= ATTACKERS_PER_SQUAD && undeployedMedics.length < MEDICS_PER_SQUAD) {
+                // Need medic to complete squad
+                mySpawn.spawnCreep([MOVE, MOVE, HEAL, HEAL]);
+            } else {
+                // Spawn attackers to fill squads
+                mySpawn.spawnCreep([TOUGH, TOUGH, MOVE, MOVE, MOVE, ATTACK, ATTACK, ATTACK]);
+            }
         }
     }
 }
@@ -346,37 +366,43 @@ function runMedicBehavior(creep, mySpawn, myCreeps, enemySpawn) {
     const isDeployedMedic = deployedMedics.has(creep.id);
 
     if (isDeployedMedic && enemySpawn) {
-        // Deployed combat medic: follow assault force and continuously heal squad attackers
-        // Get squad attackers only (not other medics or self)
-        const squadAttackers = myCreeps.filter(c => deployedAttackers.has(c.id));
+        // Deployed combat medic: follow and continuously heal squad members only
+        const medicSquad = squadAssignments[creep.id];
+        const squadmates = myCreeps.filter(c =>
+            c.id !== creep.id &&
+            squadAssignments[c.id] === medicSquad &&
+            deployedAttackers.has(c.id)
+        );
 
-        // Find damaged squad attackers and sort by most damaged
-        const damagedAttacker = squadAttackers
-            .filter(c => c.hits < c.hitsMax)
-            .sort((a, b) => a.hits - b.hits)[0];
+        if (squadmates.length > 0) {
+            // Heal squad members only
+            const damagedSquadmate = squadmates
+                .filter(c => c.hits < c.hitsMax)
+                .sort((a, b) => a.hits - b.hits)[0];
 
-        if (damagedAttacker) {
-            // Priority: Heal wounded squad attackers
-            if (creep.heal(damagedAttacker) === ERR_NOT_IN_RANGE) {
-                cachedMoveTo(creep, damagedAttacker, { ignoreCreeps: true });
-            }
-        } else if (squadAttackers.length > 0) {
-            // No wounded, continuously heal undamaged squad attackers
-            const nearestAttacker = creep.findClosestByRange(squadAttackers);
+            if (damagedSquadmate) {
+                // Priority: Heal wounded squad members
+                if (creep.heal(damagedSquadmate) === ERR_NOT_IN_RANGE) {
+                    cachedMoveTo(creep, damagedSquadmate, { ignoreCreeps: true });
+                }
+            } else {
+                // No wounded, continuously heal undamaged squad members
+                const nearestSquadmate = creep.findClosestByRange(squadmates);
 
-            if (nearestAttacker) {
-                const rangeToAttacker = creep.getRangeTo(nearestAttacker);
+                if (nearestSquadmate) {
+                    const rangeToSquadmate = creep.getRangeTo(nearestSquadmate);
 
-                // Heal even if undamaged to maintain continuous healing
-                creep.heal(nearestAttacker);
+                    // Heal even if undamaged to maintain continuous healing
+                    creep.heal(nearestSquadmate);
 
-                // Move to maintain optimal healing range
-                if (rangeToAttacker > MEDIC_FOLLOW_RANGE || rangeToAttacker < 1) {
-                    cachedMoveTo(creep, nearestAttacker, { ignoreCreeps: true });
+                    // Move to maintain optimal healing range
+                    if (rangeToSquadmate > MEDIC_FOLLOW_RANGE || rangeToSquadmate < 1) {
+                        cachedMoveTo(creep, nearestSquadmate, { ignoreCreeps: true });
+                    }
                 }
             }
         } else {
-            // All squad attackers dead, heal any other deployed creeps
+            // All assigned squad members dead, heal any other deployed creeps
             const otherDeployedCreeps = myCreeps.filter(c =>
                 c.id !== creep.id && (deployedAttackers.has(c.id) || deployedMedics.has(c.id))
             );
