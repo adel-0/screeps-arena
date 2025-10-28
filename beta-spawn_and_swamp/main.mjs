@@ -47,19 +47,20 @@ function cachedMoveTo(creep, target, opts = {}) {
     const targetId = target.id || `${target.x},${target.y}`;
     const pathCache = creepPaths[creep.id];
 
-    // Check if creep is at expected position in cached path
-    const isAtExpectedPosition = pathCache &&
-                                  pathCache.pathIndex > 0 &&
-                                  pathCache.pathIndex < pathCache.path.length &&
-                                  pathCache.path[pathCache.pathIndex - 1].x === creep.x &&
-                                  pathCache.path[pathCache.pathIndex - 1].y === creep.y;
+    // Check if creep is significantly off-path (more than 2 tiles from expected position)
+    let isSignificantlyOffPath = false;
+    if (pathCache && pathCache.pathIndex > 0 && pathCache.pathIndex < pathCache.path.length) {
+        const expectedPos = pathCache.path[pathCache.pathIndex - 1];
+        const distance = Math.max(Math.abs(creep.x - expectedPos.x), Math.abs(creep.y - expectedPos.y));
+        isSignificantlyOffPath = distance > 2;
+    }
 
     // Check if we need to recalculate path
     const needsNewPath = !pathCache ||
                          pathCache.target !== targetId ||
                          tick - pathCache.tick >= PATH_REFRESH_INTERVAL ||
                          pathCache.pathIndex >= pathCache.path.length ||
-                         !isAtExpectedPosition;
+                         isSignificantlyOffPath;
 
     if (needsNewPath) {
         // Calculate new path with options
@@ -292,17 +293,17 @@ export function loop() {
                 if (nearbyEnemy) {
                     // Engage enemy creeps encountered on the way
                     if (creep.attack(nearbyEnemy) === ERR_NOT_IN_RANGE) {
-                        cachedMoveTo(creep, nearbyEnemy);
+                        cachedMoveTo(creep, nearbyEnemy, { ignoreCreeps: true });
                     }
                 } else {
                     // No enemies nearby, continue to enemy spawn
-                    cachedMoveTo(creep, enemySpawn);
+                    cachedMoveTo(creep, enemySpawn, { ignoreCreeps: true });
                     creep.attack(enemySpawn);
                 }
             } else if (targetWall) {
                 // Undeployed attacker: demolish wall blocking containers while waiting for wave
                 if (creep.attack(targetWall) === ERR_NOT_IN_RANGE) {
-                    cachedMoveTo(creep, targetWall);
+                    cachedMoveTo(creep, targetWall, { ignoreCreeps: true });
                 }
             }
         }
