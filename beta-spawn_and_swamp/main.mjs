@@ -1,5 +1,5 @@
 import { getObjectsByPrototype, createConstructionSite, getTicks, findPath, getDirection } from 'game/utils';
-import { Creep, StructureSpawn, Source, StructureContainer, StructureTower, ConstructionSite } from 'game/prototypes';
+import { Creep, StructureSpawn, Source, StructureContainer, StructureTower, ConstructionSite, StructureExtension } from 'game/prototypes';
 import { MOVE, ATTACK, RANGED_ATTACK, WORK, CARRY, RESOURCE_ENERGY, ERR_NOT_IN_RANGE, HEAL } from 'game/constants';
 
 let attackWaveLaunched = false;
@@ -63,6 +63,36 @@ export function loop() {
     const harvesters = myCreeps.filter(c => c.body.some(p => p.type === WORK));
     const attackers = myCreeps.filter(c => c.body.some(p => p.type === ATTACK || p.type === RANGED_ATTACK));
     const defenders = myCreeps.filter(c => c.body.some(p => p.type === HEAL));
+
+    // Build extensions early for economy boost
+    if (harvesters.length >= 1) {
+        const extensions = getObjectsByPrototype(StructureExtension).filter(e => e.my);
+        const constructionSites = getObjectsByPrototype(ConstructionSite).filter(s => s.my);
+        const extensionSites = constructionSites.filter(s => s.structureType === 'extension');
+        const totalExtensions = extensions.length + extensionSites.length;
+
+        // Build up to 5 extensions in efficient pattern around spawn
+        if (totalExtensions < 5) {
+            const extensionPositions = [
+                { x: mySpawn.x - 1, y: mySpawn.y - 1 },
+                { x: mySpawn.x + 1, y: mySpawn.y - 1 },
+                { x: mySpawn.x - 1, y: mySpawn.y + 1 },
+                { x: mySpawn.x + 1, y: mySpawn.y + 1 },
+                { x: mySpawn.x, y: mySpawn.y - 1 }
+            ];
+
+            for (const pos of extensionPositions) {
+                if (totalExtensions >= 5) break;
+
+                // Check if position is not already occupied by construction site or structure
+                const hasConstructionSite = constructionSites.some(s => s.x === pos.x && s.y === pos.y);
+                if (!hasConstructionSite) {
+                    createConstructionSite(pos.x, pos.y, 'extension');
+                    break; // Build one per tick
+                }
+            }
+        }
+    }
 
     // Mark when initial attack wave is ready
     if (attackers.length >= 10) {
@@ -134,9 +164,18 @@ export function loop() {
                     }
                 }
             } else {
-                // Return energy to spawn
-                if (creep.transfer(mySpawn, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
-                    cachedMoveTo(creep, mySpawn);
+                // Return energy to spawn or extensions
+                const extensions = getObjectsByPrototype(StructureExtension).filter(
+                    e => e.my && e.store.getFreeCapacity(RESOURCE_ENERGY) > 0
+                );
+                const target = extensions.length > 0 ?
+                    creep.findClosestByPath(extensions) :
+                    mySpawn;
+
+                if (target) {
+                    if (creep.transfer(target, RESOURCE_ENERGY) === ERR_NOT_IN_RANGE) {
+                        cachedMoveTo(creep, target);
+                    }
                 }
             }
         } else if (isDefender) {
