@@ -87,6 +87,33 @@ function findNearestEnemy(creep, maxRange) {
 }
 
 /**
+ * Find the most damaged creep from an array of creeps
+ * @param {Creep[]} creeps - Array of creeps to search
+ * @returns {Creep|null} Most damaged creep or null if none damaged
+ */
+function findMostDamagedCreep(creeps) {
+    return creeps
+        .filter(c => c.hits < c.hitsMax)
+        .sort((a, b) => a.hits - b.hits)[0] || null;
+}
+
+/**
+ * Get all squad members for a given creep
+ * @param {Creep} creep - The creep whose squad to find
+ * @param {Creep[]} allCreeps - All friendly creeps
+ * @param {boolean} attackersOnly - If true, only return attackers
+ * @returns {Creep[]} Array of squad member creeps
+ */
+function getSquadMembers(creep, allCreeps, attackersOnly = false) {
+    const squad = squadAssignments[creep.id];
+    return allCreeps.filter(c =>
+        c.id !== creep.id &&
+        squadAssignments[c.id] === squad &&
+        (!attackersOnly || deployedAttackers.has(c.id))
+    );
+}
+
+/**
  * Move creep to target with path caching to avoid constant rerouting
  * @param {Creep} creep - The creep to move
  * @param {object} target - The target object or position
@@ -149,31 +176,23 @@ function cachedMoveTo(creep, target, opts = {}) {
 function cleanupDeadCreepState(myCreeps) {
     const aliveCreepIds = new Set(myCreeps.map(c => c.id));
 
-    // Clean up path cache
-    for (const creepId in creepPaths) {
-        if (!aliveCreepIds.has(creepId)) {
-            delete creepPaths[creepId];
+    // Cleanup objects and sets using unified approach
+    const objectsToClean = [creepPaths, squadAssignments];
+    const setsToClean = [deployedAttackers, deployedMedics];
+
+    for (const obj of objectsToClean) {
+        for (const creepId in obj) {
+            if (!aliveCreepIds.has(creepId)) {
+                delete obj[creepId];
+            }
         }
     }
 
-    // Clean up deployed attackers set
-    for (const creepId of deployedAttackers) {
-        if (!aliveCreepIds.has(creepId)) {
-            deployedAttackers.delete(creepId);
-        }
-    }
-
-    // Clean up deployed medics set
-    for (const creepId of deployedMedics) {
-        if (!aliveCreepIds.has(creepId)) {
-            deployedMedics.delete(creepId);
-        }
-    }
-
-    // Clean up squad assignments
-    for (const creepId in squadAssignments) {
-        if (!aliveCreepIds.has(creepId)) {
-            delete squadAssignments[creepId];
+    for (const set of setsToClean) {
+        for (const creepId of set) {
+            if (!aliveCreepIds.has(creepId)) {
+                set.delete(creepId);
+            }
         }
     }
 }
@@ -367,18 +386,11 @@ function runMedicBehavior(creep, mySpawn, myCreeps, enemySpawn) {
 
     if (isDeployedMedic && enemySpawn) {
         // Deployed combat medic: follow and continuously heal squad members only
-        const medicSquad = squadAssignments[creep.id];
-        const squadmates = myCreeps.filter(c =>
-            c.id !== creep.id &&
-            squadAssignments[c.id] === medicSquad &&
-            deployedAttackers.has(c.id)
-        );
+        const squadmates = getSquadMembers(creep, myCreeps, true);
 
         if (squadmates.length > 0) {
             // Heal squad members only
-            const damagedSquadmate = squadmates
-                .filter(c => c.hits < c.hitsMax)
-                .sort((a, b) => a.hits - b.hits)[0];
+            const damagedSquadmate = findMostDamagedCreep(squadmates);
 
             if (damagedSquadmate) {
                 // Priority: Heal wounded squad members
@@ -408,9 +420,8 @@ function runMedicBehavior(creep, mySpawn, myCreeps, enemySpawn) {
             );
 
             if (otherDeployedCreeps.length > 0) {
-                const healTarget = otherDeployedCreeps
-                    .filter(c => c.hits < c.hitsMax)
-                    .sort((a, b) => a.hits - b.hits)[0] || creep.findClosestByRange(otherDeployedCreeps);
+                const healTarget = findMostDamagedCreep(otherDeployedCreeps) ||
+                    creep.findClosestByRange(otherDeployedCreeps);
 
                 if (healTarget) {
                     creep.heal(healTarget);
