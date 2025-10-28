@@ -434,15 +434,17 @@ function runAttackerBehavior(creep, mySpawn, enemySpawn) {
             creep.attack(enemySpawn);
         }
     } else {
-        // Undeployed attacker: wait near spawn without blocking harvester paths
-        // Attack wall if in range, but don't move to it to avoid blocking
-        if (targetWall && creep.getRangeTo(targetWall) === 1) {
-            creep.attack(targetWall);
-        }
-
-        // Stay near spawn while waiting for deployment
-        if (creep.getRangeTo(mySpawn) > DEFENDER_IDLE_RANGE) {
-            cachedMoveTo(creep, mySpawn);
+        // Undeployed attacker: demolish walls or wait near spawn
+        if (targetWall) {
+            // Actively pursue and demolish walls blocking containers
+            if (creep.attack(targetWall) === ERR_NOT_IN_RANGE) {
+                cachedMoveTo(creep, targetWall);
+            }
+        } else {
+            // No walls to demolish, stay near spawn while waiting for deployment
+            if (creep.getRangeTo(mySpawn) > DEFENDER_IDLE_RANGE) {
+                cachedMoveTo(creep, mySpawn);
+            }
         }
     }
 }
