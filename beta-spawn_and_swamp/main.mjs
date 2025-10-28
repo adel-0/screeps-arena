@@ -1,15 +1,40 @@
 import { getObjectsByPrototype, createConstructionSite, getTicks, findPath, getDirection } from 'game/utils';
-import { Creep, StructureSpawn, Source, StructureContainer, StructureTower, ConstructionSite, StructureExtension } from 'game/prototypes';
+import { Creep, StructureSpawn, Source, StructureContainer, StructureTower, ConstructionSite, StructureExtension, StructureWall } from 'game/prototypes';
 import { MOVE, ATTACK, RANGED_ATTACK, WORK, CARRY, RESOURCE_ENERGY, ERR_NOT_IN_RANGE, HEAL } from 'game/constants';
 
-let attackWaveLaunched = false;
 let creepPaths = {}; // Cache paths: { creepId: { target: targetId, tick: lastCalculatedTick } }
+let targetWall = null; // Wall blocking access to containers
+let deployedAttackers = new Set(); // Track which attackers are deployed to attack
+let firstWaveLaunched = false; // Track if initial wave of 5 has launched
 
 /**
  * Spawn and Swamp Dominator
  */
 
 const PATH_REFRESH_INTERVAL = 10; // Recalculate path every 10 ticks
+
+/**
+ * Find nearest enemy creep within specified range
+ * @param {Creep} creep - The creep searching for enemies
+ * @param {number} maxRange - Maximum distance to search
+ * @returns {Creep|null} Nearest enemy creep or null if none found
+ */
+function findNearestEnemy(creep, maxRange) {
+    const enemyCreeps = getObjectsByPrototype(Creep).filter(c => !c.my);
+
+    let nearestEnemy = null;
+    let minDistance = maxRange + 1;
+
+    for (const enemy of enemyCreeps) {
+        const distance = creep.getRangeTo(enemy);
+        if (distance <= maxRange && distance < minDistance) {
+            minDistance = distance;
+            nearestEnemy = enemy;
+        }
+    }
+
+    return nearestEnemy;
+}
 
 /**
  * Move creep to target with path caching to avoid constant rerouting
@@ -51,16 +76,21 @@ export function loop() {
     const enemySpawn = getObjectsByPrototype(StructureSpawn).find(s => !s.my);
     const myCreeps = getObjectsByPrototype(Creep).filter(c => c.my);
 
-    // Clean up path cache for dead creeps
+    // Clean up path cache and deployed attackers set for dead creeps
     const aliveCreepIds = new Set(myCreeps.map(c => c.id));
     for (const creepId in creepPaths) {
         if (!aliveCreepIds.has(creepId)) {
             delete creepPaths[creepId];
         }
     }
+    for (const creepId of deployedAttackers) {
+        if (!aliveCreepIds.has(creepId)) {
+            deployedAttackers.delete(creepId);
+        }
+    }
 
     // Count creeps by body type
-    const harvesters = myCreeps.filter(c => c.body.some(p => p.type === WORK));
+    const harvesters = myCreeps.filter(c => c.body.some(p => p.type === CARRY));
     const attackers = myCreeps.filter(c => c.body.some(p => p.type === ATTACK || p.type === RANGED_ATTACK));
     const defenders = myCreeps.filter(c => c.body.some(p => p.type === HEAL));
 
@@ -94,13 +124,24 @@ export function loop() {
         }
     }
 
-    // Mark when initial attack wave is ready
-    if (attackers.length >= 10) {
-        attackWaveLaunched = true;
+    // Deploy attack waves
+    const undeployedAttackers = attackers.filter(a => !deployedAttackers.has(a.id));
+
+    if (!firstWaveLaunched && attackers.length >= 5) {
+        // Launch initial wave of 5
+        for (const attacker of attackers) {
+            deployedAttackers.add(attacker.id);
+        }
+        firstWaveLaunched = true;
+    } else if (firstWaveLaunched && undeployedAttackers.length >= 3) {
+        // Launch subsequent waves of 3
+        for (let i = 0; i < 3 && i < undeployedAttackers.length; i++) {
+            deployedAttackers.add(undeployedAttackers[i].id);
+        }
     }
 
     // Build defenses after initial wave
-    if (attackWaveLaunched) {
+    if (firstWaveLaunched) {
         const towers = getObjectsByPrototype(StructureTower).filter(t => t.my);
         const constructionSites = getObjectsByPrototype(ConstructionSite).filter(s => s.my);
 
@@ -115,7 +156,7 @@ export function loop() {
     if (mySpawn && !mySpawn.spawning) {
         if (harvesters.length < 3) {
             // Phase 1: Harvesters
-            mySpawn.spawnCreep([WORK, WORK, CARRY, MOVE]);
+            mySpawn.spawnCreep([CARRY, CARRY, MOVE, MOVE]);
         } else if (attackers.length < 10) {
             // Phase 2: Initial attack wave
             mySpawn.spawnCreep([MOVE, MOVE, ATTACK, ATTACK]);
@@ -128,12 +169,26 @@ export function loop() {
         }
     }
 
-    // Attack only when we have enough units for a group assault
-    const shouldAttack = attackers.length >= 5;
+    // Find wall blocking access to enclosed containers
+    if (!targetWall || targetWall.hits === undefined) {
+        const containers = getObjectsByPrototype(StructureContainer).filter(c => c.store.getUsedCapacity(RESOURCE_ENERGY) > 0);
+        const walls = getObjectsByPrototype(StructureWall);
+
+        // Find walls that are directly adjacent (range 1) to containers with energy
+        // These are walls forming the enclosure around the container
+        const wallsBlockingContainers = walls.filter(wall =>
+            containers.some(container => wall.getRangeTo(container) === 1)
+        );
+
+        // Pick the wall closest to our spawn to minimize travel time
+        if (wallsBlockingContainers.length > 0) {
+            targetWall = mySpawn.findClosestByRange(wallsBlockingContainers);
+        }
+    }
 
     // Creep behavior
     for (const creep of myCreeps) {
-        const isHarvester = creep.body.some(p => p.type === WORK);
+        const isHarvester = creep.body.some(p => p.type === CARRY);
         const isDefender = creep.body.some(p => p.type === HEAL);
 
         if (isHarvester) {
@@ -179,34 +234,70 @@ export function loop() {
                 }
             }
         } else if (isDefender) {
-            // Defender: stay near spawn and heal damaged units
+            // Defender: active defense - heal friendlies and attack enemies in base area
             const damagedCreep = myCreeps.find(c => c.hits < c.hitsMax);
+
             if (damagedCreep) {
+                // Priority 1: Heal damaged friendlies
                 if (creep.heal(damagedCreep) === ERR_NOT_IN_RANGE) {
                     cachedMoveTo(creep, damagedCreep);
                 }
             } else {
-                // Stay near spawn
-                if (creep.getRangeTo(mySpawn) > 3) {
-                    cachedMoveTo(creep, mySpawn);
+                // Priority 2: Attack enemies near base (within 5 tiles of spawn)
+                const enemyCreeps = getObjectsByPrototype(Creep).filter(c => !c.my);
+                const baseThreats = enemyCreeps.filter(e => e.getRangeTo(mySpawn) <= 5);
+
+                if (baseThreats.length > 0) {
+                    const closestThreat = creep.findClosestByRange(baseThreats);
+                    if (closestThreat) {
+                        if (creep.attack(closestThreat) === ERR_NOT_IN_RANGE) {
+                            cachedMoveTo(creep, closestThreat);
+                        }
+                    }
+                } else {
+                    // Stay near spawn
+                    if (creep.getRangeTo(mySpawn) > 3) {
+                        cachedMoveTo(creep, mySpawn);
+                    }
                 }
             }
         } else {
-            // Attacker: wait for group, then assault
-            if (shouldAttack && enemySpawn) {
-                cachedMoveTo(creep, enemySpawn);
-                creep.attack(enemySpawn);
-                creep.rangedAttack(enemySpawn);
+            // Attacker: check if deployed for assault
+            const isDeployed = deployedAttackers.has(creep.id);
+
+            if (isDeployed && enemySpawn) {
+                // Deployed attacker: balanced engagement - fight enemies while pushing to spawn
+                const nearbyEnemy = findNearestEnemy(creep, 5);
+
+                if (nearbyEnemy) {
+                    // Engage enemy creeps encountered on the way
+                    if (creep.attack(nearbyEnemy) === ERR_NOT_IN_RANGE) {
+                        cachedMoveTo(creep, nearbyEnemy);
+                    }
+                } else {
+                    // No enemies nearby, continue to enemy spawn
+                    cachedMoveTo(creep, enemySpawn);
+                    creep.attack(enemySpawn);
+                }
+            } else if (targetWall) {
+                // Undeployed attacker: demolish wall blocking containers while waiting for wave
+                if (creep.attack(targetWall) === ERR_NOT_IN_RANGE) {
+                    cachedMoveTo(creep, targetWall);
+                }
             }
         }
     }
 
-    // Tower behavior: attack enemies in range
+    // Tower behavior: attack closest enemies in range
     const myTowers = getObjectsByPrototype(StructureTower).filter(t => t.my);
     for (const tower of myTowers) {
         const enemyCreeps = getObjectsByPrototype(Creep).filter(c => !c.my);
         if (enemyCreeps.length > 0 && !tower.cooldown) {
-            tower.attack(enemyCreeps[0]);
+            // Prioritize closest enemy to spawn
+            const closestEnemy = mySpawn.findClosestByRange(enemyCreeps);
+            if (closestEnemy) {
+                tower.attack(closestEnemy);
+            }
         }
     }
 }
