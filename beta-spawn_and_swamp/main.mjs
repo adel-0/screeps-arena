@@ -26,30 +26,33 @@ const NATO_ALPHABET = [
  * Spawn and Swamp Dominator
  */
 
+// ===========================
 // Configuration Constants
-const PATH_REFRESH_INTERVAL = 3; // Recalculate path every 5 ticks
-const OFFPATH_DETECTION_THRESHOLD = 2; // Max tiles away from expected path position
+// ===========================
 
-// Extension Construction
-const MIN_HARVESTERS_FOR_EXTENSIONS = 1;
-const MAX_EXTENSIONS = 5;
+const PATHFINDING_CONFIG = {
+    PATH_REFRESH_INTERVAL: 3, // Recalculate path every 3 ticks
+    OFFPATH_DETECTION_THRESHOLD: 2 // Max tiles away from expected path position
+};
 
-// Squad Composition
-const ATTACKERS_PER_SQUAD = 3;
-const MEDICS_PER_SQUAD = 1;
-const KILL_SQUAD_SIZE = 2; // Fast strike team
+const ECONOMY_CONFIG = {
+    MIN_HARVESTERS_FOR_EXTENSIONS: 1,
+    MAX_EXTENSIONS: 5,
+    TARGET_HARVESTER_COUNT: 3,
+    HARVESTER_FLEE_RANGE: 10 // Range at which harvesters flee from enemies
+};
 
-// Unit Production Targets
-const TARGET_HARVESTER_COUNT = 3;
-
-// Combat and Defense Ranges
-const BASE_THREAT_DETECTION_RANGE = 40; // Range to detect enemies near base
-const DEFENDER_IDLE_RANGE = 3; // Distance from spawn for idle defenders
-const ATTACKER_ENEMY_DETECTION_RANGE = 8; // Range for attackers to detect threats
-const ATTACKER_HARMLESS_DETECTION_RANGE = 4; // Range for attackers to detect harmless enemies
-const MEDIC_FOLLOW_RANGE = 2; // Max range before medic moves to follow assault force
-const SQUAD_COHESION_RANGE = 3; // Max distance followers can be from squad leader
-const HARVESTER_FLEE_RANGE = 10; // Range at which harvesters flee from enemies
+const COMBAT_CONFIG = {
+    ATTACKERS_PER_SQUAD: 3,
+    MEDICS_PER_SQUAD: 1,
+    KILL_SQUAD_SIZE: 2, // Fast strike team
+    BASE_THREAT_DETECTION_RANGE: 40, // Range to detect enemies near base
+    DEFENDER_IDLE_RANGE: 3, // Distance from spawn for idle defenders
+    ATTACKER_ENEMY_DETECTION_RANGE: 8, // Range for attackers to detect threats
+    ATTACKER_HARMLESS_DETECTION_RANGE: 4, // Range for attackers to detect harmless enemies
+    MEDIC_FOLLOW_RANGE: 2, // Max range before medic moves to follow assault force
+    SQUAD_COHESION_RANGE: 3 // Max distance followers can be from squad leader
+};
 
 /**
  * Get all enemy creeps
@@ -130,6 +133,10 @@ function findMostDamagedCreep(creeps) {
         .sort((a, b) => a.hits - b.hits)[0] || null;
 }
 
+// ===========================
+// Squad Management Module
+// ===========================
+
 /**
  * Get all squad members for a given creep
  * @param {Creep} creep - The creep whose squad to find
@@ -142,6 +149,7 @@ function getSquadMembers(creep, allCreeps, attackersOnly = false) {
     return allCreeps.filter(c =>
         c.id !== creep.id &&
         squadAssignments[c.id] === squad &&
+        !killSquadCreeps.has(c.id) &&
         (!attackersOnly || deployedAttackers.has(c.id))
     );
 }
@@ -247,6 +255,10 @@ function calculateKillSquadWaypoint(mySpawn, enemySpawn) {
     }
 }
 
+// ===========================
+// Path Caching Module
+// ===========================
+
 /**
  * Move creep to target with path caching to avoid constant rerouting
  * @param {Creep} creep - The creep to move
@@ -263,13 +275,13 @@ function cachedMoveTo(creep, target, opts = {}) {
     if (pathCache && pathCache.pathIndex > 0 && pathCache.pathIndex < pathCache.path.length) {
         const expectedPos = pathCache.path[pathCache.pathIndex - 1];
         const distance = Math.max(Math.abs(creep.x - expectedPos.x), Math.abs(creep.y - expectedPos.y));
-        isSignificantlyOffPath = distance > OFFPATH_DETECTION_THRESHOLD;
+        isSignificantlyOffPath = distance > PATHFINDING_CONFIG.OFFPATH_DETECTION_THRESHOLD;
     }
 
     // Check if we need to recalculate path
     const needsNewPath = !pathCache ||
                          pathCache.target !== targetId ||
-                         tick - pathCache.tick >= PATH_REFRESH_INTERVAL ||
+                         tick - pathCache.tick >= PATHFINDING_CONFIG.PATH_REFRESH_INTERVAL ||
                          pathCache.pathIndex >= pathCache.path.length ||
                          isSignificantlyOffPath;
 
@@ -303,6 +315,34 @@ function cachedMoveTo(creep, target, opts = {}) {
     }
 }
 
+// ===========================
+// Cleanup Module
+// ===========================
+
+/**
+ * Generic cleanup utility for objects and sets
+ * @param {Set} validIds - Set of IDs that should be kept
+ * @param {Object[]} objects - Array of objects to clean (removes keys not in validIds)
+ * @param {Set[]} sets - Array of sets to clean (removes values not in validIds)
+ */
+function cleanupByIdSet(validIds, objects = [], sets = []) {
+    for (const obj of objects) {
+        for (const id in obj) {
+            if (!validIds.has(id)) {
+                delete obj[id];
+            }
+        }
+    }
+
+    for (const set of sets) {
+        for (const id of set) {
+            if (!validIds.has(id)) {
+                set.delete(id);
+            }
+        }
+    }
+}
+
 /**
  * Clean up state tracking for dead creeps
  * @param {Creep[]} myCreeps - Array of currently alive friendly creeps
@@ -310,25 +350,12 @@ function cachedMoveTo(creep, target, opts = {}) {
 function cleanupDeadCreepState(myCreeps) {
     const aliveCreepIds = new Set(myCreeps.map(c => c.id));
 
-    // Cleanup objects and sets using unified approach
-    const objectsToClean = [creepPaths, squadAssignments];
-    const setsToClean = [deployedAttackers, deployedMedics, killSquadCreeps, killSquadReachedWaypoint];
-
-    for (const obj of objectsToClean) {
-        for (const creepId in obj) {
-            if (!aliveCreepIds.has(creepId)) {
-                delete obj[creepId];
-            }
-        }
-    }
-
-    for (const set of setsToClean) {
-        for (const creepId of set) {
-            if (!aliveCreepIds.has(creepId)) {
-                set.delete(creepId);
-            }
-        }
-    }
+    // Cleanup all creep-based tracking structures
+    cleanupByIdSet(
+        aliveCreepIds,
+        [creepPaths, squadAssignments],
+        [deployedAttackers, deployedMedics, killSquadCreeps, killSquadReachedWaypoint]
+    );
 
     // Clean up squad leaders if the leader is dead or reassign if needed
     for (const squadName in squadLeaders) {
@@ -357,13 +384,7 @@ function cleanupDeadCreepState(myCreeps) {
  */
 function cleanupDeadTargets(enemyCreeps) {
     const aliveEnemyIds = new Set(enemyCreeps.map(e => e.id));
-
-    for (const squadName in squadTargets) {
-        const targetId = squadTargets[squadName];
-        if (targetId && !aliveEnemyIds.has(targetId)) {
-            delete squadTargets[squadName];
-        }
-    }
+    cleanupByIdSet(aliveEnemyIds, [squadTargets]);
 }
 
 /**
@@ -372,13 +393,13 @@ function cleanupDeadTargets(enemyCreeps) {
  * @param {Creep[]} harvesters - Array of harvester creeps
  */
 function manageExtensionConstruction(mySpawn, harvesters) {
-    if (harvesters.length >= MIN_HARVESTERS_FOR_EXTENSIONS) {
+    if (harvesters.length >= ECONOMY_CONFIG.MIN_HARVESTERS_FOR_EXTENSIONS) {
         const extensions = getObjectsByPrototype(StructureExtension).filter(e => e.my);
         const constructionSites = getObjectsByPrototype(ConstructionSite).filter(s => s.my);
         const extensionSites = constructionSites.filter(s => s.structureType === 'extension');
         const totalExtensions = extensions.length + extensionSites.length;
 
-        if (totalExtensions < MAX_EXTENSIONS) {
+        if (totalExtensions < ECONOMY_CONFIG.MAX_EXTENSIONS) {
             const extensionPositions = [
                 { x: mySpawn.x - 1, y: mySpawn.y - 1 },
                 { x: mySpawn.x + 1, y: mySpawn.y - 1 },
@@ -388,7 +409,7 @@ function manageExtensionConstruction(mySpawn, harvesters) {
             ];
 
             for (const pos of extensionPositions) {
-                if (totalExtensions >= MAX_EXTENSIONS) break;
+                if (totalExtensions >= ECONOMY_CONFIG.MAX_EXTENSIONS) break;
 
                 const hasConstructionSite = constructionSites.some(s => s.x === pos.x && s.y === pos.y);
                 if (!hasConstructionSite) {
@@ -421,8 +442,8 @@ function deployKillSquad(attackers, mySpawn) {
     });
 
     // Deploy kill squad when we have 2 fast attackers
-    if (!killSquadDeployed && killSquadCandidates.length >= KILL_SQUAD_SIZE) {
-        for (let i = 0; i < KILL_SQUAD_SIZE; i++) {
+    if (!killSquadDeployed && killSquadCandidates.length >= COMBAT_CONFIG.KILL_SQUAD_SIZE) {
+        for (let i = 0; i < COMBAT_CONFIG.KILL_SQUAD_SIZE; i++) {
             const attacker = killSquadCandidates[i];
             killSquadCreeps.add(attacker.id);
             deployedAttackers.add(attacker.id);
@@ -441,17 +462,12 @@ function deployAttackWaves(attackers, medics, mySpawn) {
     const undeployedAttackers = attackers.filter(a => !deployedAttackers.has(a.id) && !killSquadCreeps.has(a.id));
     const undeployedMedics = medics.filter(d => !deployedMedics.has(d.id));
 
-    // Don't deploy while spawn is actively spawning to ensure all squad members are ready
-    if (mySpawn && mySpawn.spawning) {
-        return;
-    }
-
     // Deploy complete squads only when we have enough units
-    if (undeployedAttackers.length >= ATTACKERS_PER_SQUAD && undeployedMedics.length >= MEDICS_PER_SQUAD) {
+    if (undeployedAttackers.length >= COMBAT_CONFIG.ATTACKERS_PER_SQUAD && undeployedMedics.length >= COMBAT_CONFIG.MEDICS_PER_SQUAD) {
         const squadName = NATO_ALPHABET[nextSquadIndex % NATO_ALPHABET.length];
 
         // Deploy attackers - first one becomes squad leader
-        for (let i = 0; i < ATTACKERS_PER_SQUAD; i++) {
+        for (let i = 0; i < COMBAT_CONFIG.ATTACKERS_PER_SQUAD; i++) {
             const attacker = undeployedAttackers[i];
             deployedAttackers.add(attacker.id);
             squadAssignments[attacker.id] = squadName;
@@ -463,7 +479,7 @@ function deployAttackWaves(attackers, medics, mySpawn) {
         }
 
         // Deploy medics
-        for (let i = 0; i < MEDICS_PER_SQUAD; i++) {
+        for (let i = 0; i < COMBAT_CONFIG.MEDICS_PER_SQUAD; i++) {
             const medic = undeployedMedics[i];
             deployedMedics.add(medic.id);
             squadAssignments[medic.id] = squadName;
@@ -498,7 +514,7 @@ function manageBuildDefenses(mySpawn) {
  */
 function executeSpawnStrategy(mySpawn, harvesters, attackers, medics) {
     if (mySpawn && !mySpawn.spawning) {
-        if (harvesters.length < TARGET_HARVESTER_COUNT) {
+        if (harvesters.length < ECONOMY_CONFIG.TARGET_HARVESTER_COUNT) {
             // Phase 1: Build economy with harvesters
             // First harvester: cheap 2C2M for early bootstrap
             // Subsequent harvesters: efficient 3C3M for better throughput
@@ -515,7 +531,7 @@ function executeSpawnStrategy(mySpawn, harvesters, attackers, medics) {
                 return moveCount === 4 && attackCount === 2;
             }).length;
 
-            if (killSquadMemberCount < KILL_SQUAD_SIZE) {
+            if (killSquadMemberCount < COMBAT_CONFIG.KILL_SQUAD_SIZE) {
                 // Spawn fast strike team member: 4 MOVE, 2 ATTACK
                 // Optimized for speed through swamps, takes alternate route
                 mySpawn.spawnCreep([MOVE, MOVE, MOVE, MOVE, ATTACK, ATTACK]);
@@ -524,7 +540,7 @@ function executeSpawnStrategy(mySpawn, harvesters, attackers, medics) {
                 const undeployedAttackers = attackers.filter(a => !deployedAttackers.has(a.id) && !killSquadCreeps.has(a.id));
                 const undeployedMedics = medics.filter(m => !deployedMedics.has(m.id));
 
-                if (undeployedAttackers.length >= ATTACKERS_PER_SQUAD && undeployedMedics.length < MEDICS_PER_SQUAD) {
+                if (undeployedAttackers.length >= COMBAT_CONFIG.ATTACKERS_PER_SQUAD && undeployedMedics.length < COMBAT_CONFIG.MEDICS_PER_SQUAD) {
                     // Need medic to complete squad
                     mySpawn.spawnCreep([MOVE, HEAL, MOVE]);
                 } else {
@@ -568,7 +584,7 @@ function initializeTargetWalls(mySpawn) {
  */
 function runHarvesterBehavior(creep, mySpawn) {
     // Priority: Flee from nearby enemies
-    const nearbyEnemy = findNearestEnemy(creep, HARVESTER_FLEE_RANGE);
+    const nearbyEnemy = findNearestEnemy(creep, ECONOMY_CONFIG.HARVESTER_FLEE_RANGE);
 
     if (nearbyEnemy) {
         // Calculate flee direction: move away from enemy toward spawn
@@ -665,7 +681,7 @@ function runMedicBehavior(creep, mySpawn, myCreeps, enemySpawn) {
                     const rangeToTarget = creep.getRangeTo(followTarget);
 
                     // Follow the leader to maintain formation (no healing needed)
-                    if (rangeToTarget > MEDIC_FOLLOW_RANGE || rangeToTarget < 1) {
+                    if (rangeToTarget > COMBAT_CONFIG.MEDIC_FOLLOW_RANGE || rangeToTarget < 1) {
                         cachedMoveTo(creep, followTarget, { ignoreCreeps: true });
                     }
                 }
@@ -692,13 +708,13 @@ function runMedicBehavior(creep, mySpawn, myCreeps, enemySpawn) {
                         creep.rangedHeal(healTarget);
                     }
 
-                    if (rangeToTarget > MEDIC_FOLLOW_RANGE) {
+                    if (rangeToTarget > COMBAT_CONFIG.MEDIC_FOLLOW_RANGE) {
                         cachedMoveTo(creep, healTarget, { ignoreCreeps: true });
                     }
                 } else {
                     // No damaged allies, follow nearest deployed creep
                     const followTarget = creep.findClosestByRange(otherDeployedCreeps);
-                    if (followTarget && creep.getRangeTo(followTarget) > MEDIC_FOLLOW_RANGE) {
+                    if (followTarget && creep.getRangeTo(followTarget) > COMBAT_CONFIG.MEDIC_FOLLOW_RANGE) {
                         cachedMoveTo(creep, followTarget, { ignoreCreeps: true });
                     }
                 }
@@ -736,25 +752,40 @@ function runMedicBehavior(creep, mySpawn, myCreeps, enemySpawn) {
         } else if (squadmates.length > 0) {
             // Priority 2: Follow assigned squadmates (prevents following kill squad)
             const followTarget = creep.findClosestByRange(squadmates);
-            if (followTarget && creep.getRangeTo(followTarget) > MEDIC_FOLLOW_RANGE) {
+            if (followTarget && creep.getRangeTo(followTarget) > COMBAT_CONFIG.MEDIC_FOLLOW_RANGE) {
                 cachedMoveTo(creep, followTarget);
             }
         } else {
-            // Priority 3: Attack enemies near base or stay near spawn
-            const enemyCreeps = getAllEnemyCreeps();
-            const baseThreats = enemyCreeps.filter(e => e.getRangeTo(mySpawn) <= BASE_THREAT_DETECTION_RANGE);
+            // No squad assigned yet - wait near undeployed attackers (not kill squad)
+            const undeployedAttackers = myCreeps.filter(c =>
+                c.body.some(p => p.type === ATTACK || p.type === RANGED_ATTACK) &&
+                !deployedAttackers.has(c.id) &&
+                !killSquadCreeps.has(c.id)
+            );
 
-            if (baseThreats.length > 0) {
-                const closestThreat = creep.findClosestByRange(baseThreats);
-                if (closestThreat) {
-                    if (creep.attack(closestThreat) === ERR_NOT_IN_RANGE) {
-                        cachedMoveTo(creep, closestThreat);
-                    }
+            if (undeployedAttackers.length > 0) {
+                // Follow nearest undeployed attacker to stay grouped for deployment
+                const followTarget = creep.findClosestByRange(undeployedAttackers);
+                if (followTarget && creep.getRangeTo(followTarget) > COMBAT_CONFIG.MEDIC_FOLLOW_RANGE) {
+                    cachedMoveTo(creep, followTarget);
                 }
             } else {
-                // Stay near spawn
-                if (creep.getRangeTo(mySpawn) > DEFENDER_IDLE_RANGE) {
-                    cachedMoveTo(creep, mySpawn);
+                // No undeployed attackers - defend base or stay near spawn
+                const enemyCreeps = getAllEnemyCreeps();
+                const baseThreats = enemyCreeps.filter(e => e.getRangeTo(mySpawn) <= COMBAT_CONFIG.BASE_THREAT_DETECTION_RANGE);
+
+                if (baseThreats.length > 0) {
+                    const closestThreat = creep.findClosestByRange(baseThreats);
+                    if (closestThreat) {
+                        if (creep.attack(closestThreat) === ERR_NOT_IN_RANGE) {
+                            cachedMoveTo(creep, closestThreat);
+                        }
+                    }
+                } else {
+                    // Stay near spawn
+                    if (creep.getRangeTo(mySpawn) > COMBAT_CONFIG.DEFENDER_IDLE_RANGE) {
+                        cachedMoveTo(creep, mySpawn);
+                    }
                 }
             }
         }
@@ -838,7 +869,7 @@ function runAttackerBehavior(creep, mySpawn, enemySpawn, myCreeps) {
             const rangeToLeader = creep.getRangeTo(leader);
 
             // If too far from leader, prioritize returning to formation
-            if (rangeToLeader > SQUAD_COHESION_RANGE) {
+            if (rangeToLeader > COMBAT_CONFIG.SQUAD_COHESION_RANGE) {
                 cachedMoveTo(creep, leader, { ignoreCreeps: true });
                 // Still attack nearby enemies while regrouping
                 const nearbyEnemy = findNearestEnemy(creep, 1);
@@ -851,7 +882,7 @@ function runAttackerBehavior(creep, mySpawn, enemySpawn, myCreeps) {
 
         // Leader designates target for the squad every tick (always picks nearest enemy)
         if (isLeader) {
-            const nearestEnemy = findNearestEnemy(creep, ATTACKER_ENEMY_DETECTION_RANGE, ATTACKER_HARMLESS_DETECTION_RANGE);
+            const nearestEnemy = findNearestEnemy(creep, COMBAT_CONFIG.ATTACKER_ENEMY_DETECTION_RANGE, COMBAT_CONFIG.ATTACKER_HARMLESS_DETECTION_RANGE);
             setSquadTarget(creep, nearestEnemy);
         }
 
@@ -862,7 +893,7 @@ function runAttackerBehavior(creep, mySpawn, enemySpawn, myCreeps) {
             const rangeToDesignatedTarget = creep.getRangeTo(designatedTarget);
 
             // Check for any enemies in detection range
-            const nearestEnemy = findNearestEnemy(creep, ATTACKER_ENEMY_DETECTION_RANGE, ATTACKER_HARMLESS_DETECTION_RANGE);
+            const nearestEnemy = findNearestEnemy(creep, COMBAT_CONFIG.ATTACKER_ENEMY_DETECTION_RANGE, COMBAT_CONFIG.ATTACKER_HARMLESS_DETECTION_RANGE);
 
             // Attack priority: designated target if in range, otherwise nearest accessible enemy
             if (rangeToDesignatedTarget <= 1) {
@@ -895,7 +926,7 @@ function runAttackerBehavior(creep, mySpawn, enemySpawn, myCreeps) {
                 creep.attack(enemySpawn);
             } else {
                 // Not at spawn yet - check for threats while approaching
-                const nearbyEnemy = findNearestEnemy(creep, ATTACKER_ENEMY_DETECTION_RANGE, ATTACKER_HARMLESS_DETECTION_RANGE);
+                const nearbyEnemy = findNearestEnemy(creep, COMBAT_CONFIG.ATTACKER_ENEMY_DETECTION_RANGE, COMBAT_CONFIG.ATTACKER_HARMLESS_DETECTION_RANGE);
 
                 if (nearbyEnemy && creep.getRangeTo(nearbyEnemy) <= 1) {
                     // Enemy adjacent - defend yourself
@@ -913,7 +944,7 @@ function runAttackerBehavior(creep, mySpawn, enemySpawn, myCreeps) {
         }
     } else {
         // Undeployed attacker: defend if under attack, otherwise demolish walls or wait near spawn
-        const nearbyEnemy = findNearestEnemy(creep, ATTACKER_ENEMY_DETECTION_RANGE);
+        const nearbyEnemy = findNearestEnemy(creep, COMBAT_CONFIG.ATTACKER_ENEMY_DETECTION_RANGE);
 
         if (nearbyEnemy) {
             // Enemy nearby - defend yourself even while waiting for deployment
@@ -933,7 +964,7 @@ function runAttackerBehavior(creep, mySpawn, enemySpawn, myCreeps) {
                 }
             } else {
                 // No walls to demolish, stay near spawn while waiting for deployment
-                if (creep.getRangeTo(mySpawn) > DEFENDER_IDLE_RANGE) {
+                if (creep.getRangeTo(mySpawn) > COMBAT_CONFIG.DEFENDER_IDLE_RANGE) {
                     cachedMoveTo(creep, mySpawn);
                 }
             }
