@@ -10,6 +10,10 @@ let squadAssignments = {}; // Map creep ID to squad name (e.g., "Alpha", "Bravo"
 let squadLeaders = {}; // Map squad name to leader creep ID
 let squadTargets = {}; // Map squad name to designated target enemy ID
 let nextSquadIndex = 0; // Track next squad to deploy
+let killSquadDeployed = false; // Track if kill squad has been sent
+let killSquadCreeps = new Set(); // Track kill squad member IDs
+let killSquadWaypoint = null; // Waypoint for kill squad (calculated once)
+let killSquadReachedWaypoint = new Set(); // Track which kill squad members reached waypoint
 
 // NATO alphabet for squad naming
 const NATO_ALPHABET = [
@@ -33,6 +37,7 @@ const MAX_EXTENSIONS = 5;
 // Squad Composition
 const ATTACKERS_PER_SQUAD = 3;
 const MEDICS_PER_SQUAD = 1;
+const KILL_SQUAD_SIZE = 2; // Fast strike team
 
 // Unit Production Targets
 const TARGET_HARVESTER_COUNT = 3;
@@ -196,6 +201,53 @@ function setSquadTarget(leaderCreep, targetEnemy) {
 }
 
 /**
+ * Calculate the alternate path waypoint (called once at start)
+ * Determines which side (north/south) the shortest path uses, then picks opposite
+ * @param {StructureSpawn} mySpawn - The friendly spawn
+ * @param {StructureSpawn} enemySpawn - The enemy spawn
+ * @returns {object|null} Waypoint position {x, y} or null
+ */
+function calculateKillSquadWaypoint(mySpawn, enemySpawn) {
+    if (!mySpawn || !enemySpawn) return null;
+
+    // Determine if enemy is on left or right
+    const enemyIsRight = enemySpawn.x > 50;
+
+    // Calculate shortest path to determine which side it uses
+    const shortestPath = findPath(mySpawn, enemySpawn);
+
+    if (!shortestPath || shortestPath.length === 0) return null;
+
+    // Find the midpoint of the path to determine if it goes north or south
+    const midIndex = Math.floor(shortestPath.length / 2);
+    const midPoint = shortestPath[midIndex];
+
+    // Center line is around y=50
+    const shortestPathGoesNorth = midPoint.y < 50;
+
+    // Choose waypoint on opposite side based on enemy position
+    if (enemyIsRight) {
+        // Enemy spawn is right
+        if (shortestPathGoesNorth) {
+            // Shortest goes north, take south route
+            return { x: 87, y: 89 };
+        } else {
+            // Shortest goes south, take north route
+            return { x: 87, y: 10 };
+        }
+    } else {
+        // Enemy spawn is left
+        if (shortestPathGoesNorth) {
+            // Shortest goes north, take south route
+            return { x: 12, y: 89 };
+        } else {
+            // Shortest goes south, take north route
+            return { x: 12, y: 10 };
+        }
+    }
+}
+
+/**
  * Move creep to target with path caching to avoid constant rerouting
  * @param {Creep} creep - The creep to move
  * @param {object} target - The target object or position
@@ -260,7 +312,7 @@ function cleanupDeadCreepState(myCreeps) {
 
     // Cleanup objects and sets using unified approach
     const objectsToClean = [creepPaths, squadAssignments];
-    const setsToClean = [deployedAttackers, deployedMedics];
+    const setsToClean = [deployedAttackers, deployedMedics, killSquadCreeps, killSquadReachedWaypoint];
 
     for (const obj of objectsToClean) {
         for (const creepId in obj) {
@@ -349,13 +401,44 @@ function manageExtensionConstruction(mySpawn, harvesters) {
 }
 
 /**
+ * Deploy kill squad for alternate path flanking
+ * @param {Creep[]} attackers - Array of attacker creeps
+ * @param {StructureSpawn} mySpawn - The friendly spawn
+ */
+function deployKillSquad(attackers, mySpawn) {
+    // Don't deploy while spawn is actively spawning
+    if (mySpawn && mySpawn.spawning) {
+        return;
+    }
+
+    // Check if we have kill squad members (4 MOVE, 2 ATTACK pattern)
+    const killSquadCandidates = attackers.filter(a => {
+        if (deployedAttackers.has(a.id) || killSquadCreeps.has(a.id)) return false;
+
+        const moveCount = a.body.filter(p => p.type === MOVE).length;
+        const attackCount = a.body.filter(p => p.type === ATTACK).length;
+        return moveCount === 4 && attackCount === 2;
+    });
+
+    // Deploy kill squad when we have 2 fast attackers
+    if (!killSquadDeployed && killSquadCandidates.length >= KILL_SQUAD_SIZE) {
+        for (let i = 0; i < KILL_SQUAD_SIZE; i++) {
+            const attacker = killSquadCandidates[i];
+            killSquadCreeps.add(attacker.id);
+            deployedAttackers.add(attacker.id);
+        }
+        killSquadDeployed = true;
+    }
+}
+
+/**
  * Deploy complete squads with NATO alphabet naming
  * @param {Creep[]} attackers - Array of attacker creeps
  * @param {Creep[]} medics - Array of medic creeps
  * @param {StructureSpawn} mySpawn - The friendly spawn
  */
 function deployAttackWaves(attackers, medics, mySpawn) {
-    const undeployedAttackers = attackers.filter(a => !deployedAttackers.has(a.id));
+    const undeployedAttackers = attackers.filter(a => !deployedAttackers.has(a.id) && !killSquadCreeps.has(a.id));
     const undeployedMedics = medics.filter(d => !deployedMedics.has(d.id));
 
     // Don't deploy while spawn is actively spawning to ensure all squad members are ready
@@ -425,18 +508,31 @@ function executeSpawnStrategy(mySpawn, harvesters, attackers, medics) {
                 mySpawn.spawnCreep([CARRY, CARRY, MOVE, MOVE]);
             }
         } else {
-            // Phase 2: Build squads - maintain ratio of 3 attackers per 1 medic
-            const undeployedAttackers = attackers.filter(a => !deployedAttackers.has(a.id));
-            const undeployedMedics = medics.filter(m => !deployedMedics.has(m.id));
+            // Phase 2: Spawn kill squad first (2 fast strikers with 4M2A)
+            const killSquadMemberCount = attackers.filter(a => {
+                const moveCount = a.body.filter(p => p.type === MOVE).length;
+                const attackCount = a.body.filter(p => p.type === ATTACK).length;
+                return moveCount === 4 && attackCount === 2;
+            }).length;
 
-            if (undeployedAttackers.length >= ATTACKERS_PER_SQUAD && undeployedMedics.length < MEDICS_PER_SQUAD) {
-                // Need medic to complete squad
-                mySpawn.spawnCreep([MOVE, HEAL, MOVE]);
+            if (killSquadMemberCount < KILL_SQUAD_SIZE) {
+                // Spawn fast strike team member: 4 MOVE, 2 ATTACK
+                // Optimized for speed through swamps, takes alternate route
+                mySpawn.spawnCreep([MOVE, MOVE, MOVE, MOVE, ATTACK, ATTACK]);
             } else {
-                // Spawn mobile melee attackers optimized for swamp terrain
-                // Extra MOVE parts at front absorb damage first, preserving ATTACK capability
-                // 5 MOVE parts for same speed as medics in swamp (moves every 3 ticks)
-                mySpawn.spawnCreep([MOVE, MOVE, ATTACK, MOVE, ATTACK, MOVE, ATTACK]);
+                // Phase 3: Build squads - maintain ratio of 3 attackers per 1 medic
+                const undeployedAttackers = attackers.filter(a => !deployedAttackers.has(a.id) && !killSquadCreeps.has(a.id));
+                const undeployedMedics = medics.filter(m => !deployedMedics.has(m.id));
+
+                if (undeployedAttackers.length >= ATTACKERS_PER_SQUAD && undeployedMedics.length < MEDICS_PER_SQUAD) {
+                    // Need medic to complete squad
+                    mySpawn.spawnCreep([MOVE, HEAL, MOVE]);
+                } else {
+                    // Spawn mobile melee attackers optimized for swamp terrain
+                    // Extra MOVE parts at front absorb damage first, preserving ATTACK capability
+                    // 5 MOVE parts for same speed as medics in swamp (moves every 3 ticks)
+                    mySpawn.spawnCreep([MOVE, MOVE, ATTACK, MOVE, ATTACK, MOVE, ATTACK]);
+                }
             }
         }
     }
@@ -575,9 +671,11 @@ function runMedicBehavior(creep, mySpawn, myCreeps, enemySpawn) {
                 }
             }
         } else {
-            // All assigned squad members dead, heal any other deployed creeps
+            // All assigned squad members dead, heal any other deployed creeps (excluding kill squad)
             const otherDeployedCreeps = myCreeps.filter(c =>
-                c.id !== creep.id && (deployedAttackers.has(c.id) || deployedMedics.has(c.id))
+                c.id !== creep.id &&
+                (deployedAttackers.has(c.id) || deployedMedics.has(c.id)) &&
+                !killSquadCreeps.has(c.id)
             );
 
             if (otherDeployedCreeps.length > 0) {
@@ -650,6 +748,63 @@ function runMedicBehavior(creep, mySpawn, myCreeps, enemySpawn) {
 }
 
 /**
+ * Run kill squad behavior - fast attackers using alternate path
+ * @param {Creep} creep - The kill squad creep
+ * @param {StructureSpawn} mySpawn - The friendly spawn
+ * @param {StructureSpawn} enemySpawn - The enemy spawn
+ */
+function runKillSquadBehavior(creep, mySpawn, enemySpawn) {
+    // Calculate waypoint once
+    if (!killSquadWaypoint) {
+        killSquadWaypoint = calculateKillSquadWaypoint(mySpawn, enemySpawn);
+    }
+
+    if (!killSquadWaypoint) return;
+
+    const allEnemies = getAllEnemyCreeps();
+
+    // Priority 1: Attack adjacent enemies while moving
+    const nearbyEnemy = findNearestEnemy(creep, 1);
+    if (nearbyEnemy) {
+        creep.attack(nearbyEnemy);
+    }
+
+    // Check if this creep has reached the waypoint
+    const hasReachedWaypoint = killSquadReachedWaypoint.has(creep.id);
+    const rangeToWaypoint = creep.getRangeTo(killSquadWaypoint);
+
+    // Mark as reached if close enough
+    if (!hasReachedWaypoint && rangeToWaypoint <= 3) {
+        killSquadReachedWaypoint.add(creep.id);
+    }
+
+    // Two-stage pathfinding: go to waypoint, then to spawn
+    if (!hasReachedWaypoint && rangeToWaypoint > 3) {
+        // Stage 1: Move to waypoint
+        cachedMoveTo(creep, killSquadWaypoint, { ignoreCreeps: true });
+    } else {
+        // Stage 2: Move to enemy spawn
+        const rangeToSpawn = creep.getRangeTo(enemySpawn);
+
+        if (rangeToSpawn <= 1) {
+            // At spawn - attack it or enemies on it
+            const enemiesAtSpawn = allEnemies.filter(e =>
+                e.x === enemySpawn.x && e.y === enemySpawn.y
+            );
+
+            if (enemiesAtSpawn.length > 0 && !nearbyEnemy) {
+                creep.attack(enemiesAtSpawn[0]);
+            } else if (!nearbyEnemy) {
+                creep.attack(enemySpawn);
+            }
+        } else {
+            // Move toward enemy spawn
+            cachedMoveTo(creep, enemySpawn, { ignoreCreeps: true });
+        }
+    }
+}
+
+/**
  * Run attacker creep behavior
  * @param {Creep} creep - The attacker creep
  * @param {StructureSpawn} mySpawn - The friendly spawn
@@ -658,8 +813,14 @@ function runMedicBehavior(creep, mySpawn, myCreeps, enemySpawn) {
  */
 function runAttackerBehavior(creep, mySpawn, enemySpawn, myCreeps) {
     const isDeployed = deployedAttackers.has(creep.id);
+    const isKillSquadMember = killSquadCreeps.has(creep.id);
 
     if (isDeployed && enemySpawn) {
+        // Kill squad members take alternate path
+        if (isKillSquadMember) {
+            runKillSquadBehavior(creep, mySpawn, enemySpawn);
+            return;
+        }
         const leader = getSquadLeader(creep, myCreeps);
         const isLeader = isSquadLeader(creep);
         const allEnemies = getAllEnemyCreeps();
@@ -814,6 +975,7 @@ export function loop() {
     const { harvesters, attackers, medics } = categorizeCreeps(myCreeps);
 
     manageExtensionConstruction(mySpawn, harvesters);
+    deployKillSquad(attackers, mySpawn);
     deployAttackWaves(attackers, medics, mySpawn);
     manageBuildDefenses(mySpawn);
     executeSpawnStrategy(mySpawn, harvesters, attackers, medics);
