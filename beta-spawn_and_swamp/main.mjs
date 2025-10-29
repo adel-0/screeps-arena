@@ -3,7 +3,7 @@ import { Creep, StructureSpawn, Source, StructureContainer, StructureTower, Cons
 import { MOVE, ATTACK, RANGED_ATTACK, WORK, CARRY, RESOURCE_ENERGY, ERR_NOT_IN_RANGE, HEAL, TOUGH } from 'game/constants';
 
 let creepPaths = {}; // Cache paths: { creepId: { target: targetId, tick: lastCalculatedTick } }
-let targetWall = null; // Wall blocking access to containers
+let targetWalls = []; // Walls blocking access to containers
 let deployedAttackers = new Set(); // Track which attackers are deployed to attack
 let deployedMedics = new Set(); // Track which medics are deployed for combat support
 let squadAssignments = {}; // Map creep ID to squad name (e.g., "Alpha", "Bravo", "Charlie")
@@ -40,7 +40,6 @@ const BASE_THREAT_DETECTION_RANGE = 40; // Range to detect enemies near base
 const DEFENDER_IDLE_RANGE = 3; // Distance from spawn for idle defenders
 const ATTACKER_ENEMY_DETECTION_RANGE = 5; // Range for attackers to detect enemies
 const MEDIC_FOLLOW_RANGE = 2; // Max range before medic moves to follow assault force
-const CONTAINER_WALL_ADJACENCY = 1; // Range to detect walls blocking containers
 
 /**
  * Get all enemy creeps
@@ -289,7 +288,13 @@ function executeSpawnStrategy(mySpawn, harvesters, attackers, medics) {
     if (mySpawn && !mySpawn.spawning) {
         if (harvesters.length < TARGET_HARVESTER_COUNT) {
             // Phase 1: Build economy with harvesters
-            mySpawn.spawnCreep([CARRY, CARRY, MOVE, MOVE]);
+            // First harvester: cheap 2C2M for early bootstrap
+            // Subsequent harvesters: efficient 3C3M for better throughput
+            if (harvesters.length === 0) {
+                mySpawn.spawnCreep([CARRY, CARRY, MOVE, MOVE]);
+            } else {
+                mySpawn.spawnCreep([CARRY, CARRY, CARRY, MOVE, MOVE, MOVE]);
+            }
         } else {
             // Phase 2: Build squads - maintain ratio of 3 attackers per 1 medic
             const undeployedAttackers = attackers.filter(a => !deployedAttackers.has(a.id));
@@ -299,30 +304,34 @@ function executeSpawnStrategy(mySpawn, harvesters, attackers, medics) {
                 // Need medic to complete squad
                 mySpawn.spawnCreep([MOVE, MOVE, HEAL, HEAL]);
             } else {
-                // Spawn attackers to fill squads
-                mySpawn.spawnCreep([TOUGH, TOUGH, MOVE, MOVE, MOVE, ATTACK, ATTACK, ATTACK]);
+                // Spawn fast melee attackers with 1:1 MOVE ratio for maximum speed
+                // TOUGH at beginning to absorb damage first (damage applies from start of array)
+                mySpawn.spawnCreep([TOUGH, ATTACK, ATTACK, ATTACK, MOVE, MOVE, MOVE, MOVE]);
             }
         }
     }
 }
 
 /**
- * Update target wall blocking container access
+ * Initialize target walls based on spawn position
  * @param {StructureSpawn} mySpawn - The friendly spawn
  */
-function updateContainerWallTarget(mySpawn) {
-    if (!targetWall || targetWall.hits === undefined) {
-        const containers = getObjectsByPrototype(StructureContainer).filter(c => c.store.getUsedCapacity(RESOURCE_ENERGY) > 0);
+function initializeTargetWalls(mySpawn) {
+    if (targetWalls.length === 0) {
         const walls = getObjectsByPrototype(StructureWall);
+        let wallPositions = [];
 
-        // Find walls that are directly adjacent to containers with energy
-        const wallsBlockingContainers = walls.filter(wall =>
-            containers.some(container => wall.getRangeTo(container) === CONTAINER_WALL_ADJACENCY)
-        );
-
-        if (wallsBlockingContainers.length > 0) {
-            targetWall = mySpawn.findClosestByRange(wallsBlockingContainers);
+        // Determine wall positions based on spawn location
+        if (mySpawn.x === 5 && mySpawn.y === 45) {
+            wallPositions = [{ x: 2, y: 46 }, { x: 11, y: 44 }];
+        } else if (mySpawn.x === 94 && mySpawn.y === 54) {
+            wallPositions = [{ x: 97, y: 55 }, { x: 88, y: 55 }];
         }
+
+        // Find actual wall objects at those positions
+        targetWalls = walls.filter(wall =>
+            wallPositions.some(pos => wall.x === pos.x && wall.y === pos.y)
+        );
     }
 }
 
@@ -502,16 +511,30 @@ function runAttackerBehavior(creep, mySpawn, enemySpawn) {
             }
         }
     } else {
-        // Undeployed attacker: demolish walls or wait near spawn
-        if (targetWall) {
-            // Actively pursue and demolish walls blocking containers
-            if (creep.attack(targetWall) === ERR_NOT_IN_RANGE) {
-                cachedMoveTo(creep, targetWall);
+        // Undeployed attacker: defend if under attack, otherwise demolish walls or wait near spawn
+        const nearbyEnemy = findNearestEnemy(creep, ATTACKER_ENEMY_DETECTION_RANGE);
+
+        if (nearbyEnemy) {
+            // Enemy nearby - defend yourself even while waiting for deployment
+            if (creep.attack(nearbyEnemy) === ERR_NOT_IN_RANGE) {
+                cachedMoveTo(creep, nearbyEnemy);
             }
         } else {
-            // No walls to demolish, stay near spawn while waiting for deployment
-            if (creep.getRangeTo(mySpawn) > DEFENDER_IDLE_RANGE) {
-                cachedMoveTo(creep, mySpawn);
+            // No threats - proceed with wall demolition or idle
+            // Filter out destroyed walls
+            const remainingWalls = targetWalls.filter(wall => wall.hits !== undefined);
+
+            if (remainingWalls.length > 0) {
+                // Actively pursue and demolish walls blocking containers
+                const closestWall = creep.findClosestByRange(remainingWalls);
+                if (closestWall && creep.attack(closestWall) === ERR_NOT_IN_RANGE) {
+                    cachedMoveTo(creep, closestWall);
+                }
+            } else {
+                // No walls to demolish, stay near spawn while waiting for deployment
+                if (creep.getRangeTo(mySpawn) > DEFENDER_IDLE_RANGE) {
+                    cachedMoveTo(creep, mySpawn);
+                }
             }
         }
     }
@@ -549,7 +572,7 @@ export function loop() {
     deployAttackWaves(attackers, medics);
     manageBuildDefenses(mySpawn);
     executeSpawnStrategy(mySpawn, harvesters, attackers, medics);
-    updateContainerWallTarget(mySpawn);
+    initializeTargetWalls(mySpawn);
 
     // Execute creep behaviors
     for (const creep of myCreeps) {
