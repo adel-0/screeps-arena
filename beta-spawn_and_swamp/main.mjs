@@ -524,7 +524,16 @@ function runMedicBehavior(creep, mySpawn, myCreeps, enemySpawn) {
 
             if (damagedSquadmate) {
                 // Priority: Heal wounded squad members
-                if (creep.heal(damagedSquadmate) === ERR_NOT_IN_RANGE) {
+                const rangeToTarget = creep.getRangeTo(damagedSquadmate);
+
+                if (rangeToTarget <= 1) {
+                    creep.heal(damagedSquadmate);
+                } else if (rangeToTarget <= 3) {
+                    creep.rangedHeal(damagedSquadmate);
+                }
+
+                // Move closer if not in optimal healing range
+                if (rangeToTarget > 1) {
                     cachedMoveTo(creep, damagedSquadmate, { ignoreCreeps: true });
                 }
             } else {
@@ -534,8 +543,12 @@ function runMedicBehavior(creep, mySpawn, myCreeps, enemySpawn) {
                 if (healTarget) {
                     const rangeToTarget = creep.getRangeTo(healTarget);
 
-                    // Continuously heal even if undamaged
-                    creep.heal(healTarget);
+                    // Continuously heal even if undamaged - use appropriate heal based on range
+                    if (rangeToTarget <= 1) {
+                        creep.heal(healTarget);
+                    } else if (rangeToTarget <= 3) {
+                        creep.rangedHeal(healTarget);
+                    }
 
                     // Follow the leader to maintain formation
                     if (rangeToTarget > MEDIC_FOLLOW_RANGE || rangeToTarget < 1) {
@@ -554,8 +567,16 @@ function runMedicBehavior(creep, mySpawn, myCreeps, enemySpawn) {
                     creep.findClosestByRange(otherDeployedCreeps);
 
                 if (healTarget) {
-                    creep.heal(healTarget);
-                    if (creep.getRangeTo(healTarget) > MEDIC_FOLLOW_RANGE) {
+                    const rangeToTarget = creep.getRangeTo(healTarget);
+
+                    // Heal at appropriate range
+                    if (rangeToTarget <= 1) {
+                        creep.heal(healTarget);
+                    } else if (rangeToTarget <= 3) {
+                        creep.rangedHeal(healTarget);
+                    }
+
+                    if (rangeToTarget > MEDIC_FOLLOW_RANGE) {
                         cachedMoveTo(creep, healTarget, { ignoreCreeps: true });
                     }
                 }
@@ -570,7 +591,16 @@ function runMedicBehavior(creep, mySpawn, myCreeps, enemySpawn) {
 
         if (damagedCreep) {
             // Priority 1: Heal damaged friendlies
-            if (creep.heal(damagedCreep) === ERR_NOT_IN_RANGE) {
+            const rangeToTarget = creep.getRangeTo(damagedCreep);
+
+            if (rangeToTarget <= 1) {
+                creep.heal(damagedCreep);
+            } else if (rangeToTarget <= 3) {
+                creep.rangedHeal(damagedCreep);
+            }
+
+            // Move closer if not in heal range
+            if (rangeToTarget > 3) {
                 cachedMoveTo(creep, damagedCreep);
             }
         } else {
