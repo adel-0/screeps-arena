@@ -8,6 +8,7 @@ let deployedAttackers = new Set(); // Track which attackers are deployed to atta
 let deployedMedics = new Set(); // Track which medics are deployed for combat support
 let squadAssignments = {}; // Map creep ID to squad name (e.g., "Alpha", "Bravo", "Charlie")
 let squadLeaders = {}; // Map squad name to leader creep ID
+let squadTargets = {}; // Map squad name to designated target enemy ID
 let nextSquadIndex = 0; // Track next squad to deploy
 
 // NATO alphabet for squad naming
@@ -142,6 +143,34 @@ function isSquadLeader(creep) {
 }
 
 /**
+ * Get the designated target for a squad
+ * @param {Creep} creep - The creep whose squad target to find
+ * @param {Creep[]} allEnemyCreeps - All enemy creeps
+ * @returns {Creep|null} Designated target creep or null if not found
+ */
+function getSquadTarget(creep, allEnemyCreeps) {
+    const squad = squadAssignments[creep.id];
+    if (!squad || !squadTargets[squad]) {
+        return null;
+    }
+
+    const targetId = squadTargets[squad];
+    return allEnemyCreeps.find(e => e.id === targetId) || null;
+}
+
+/**
+ * Set the designated target for a squad
+ * @param {Creep} leaderCreep - The squad leader creep
+ * @param {Creep} targetEnemy - The enemy to designate as target
+ */
+function setSquadTarget(leaderCreep, targetEnemy) {
+    const squad = squadAssignments[leaderCreep.id];
+    if (squad) {
+        squadTargets[squad] = targetEnemy ? targetEnemy.id : null;
+    }
+}
+
+/**
  * Move creep to target with path caching to avoid constant rerouting
  * @param {Creep} creep - The creep to move
  * @param {object} target - The target object or position
@@ -241,6 +270,21 @@ function cleanupDeadCreepState(myCreeps) {
                 // No members left, remove squad leader entry
                 delete squadLeaders[squadName];
             }
+        }
+    }
+}
+
+/**
+ * Clean up designated targets that are no longer alive
+ * @param {Creep[]} enemyCreeps - Array of currently alive enemy creeps
+ */
+function cleanupDeadTargets(enemyCreeps) {
+    const aliveEnemyIds = new Set(enemyCreeps.map(e => e.id));
+
+    for (const squadName in squadTargets) {
+        const targetId = squadTargets[squadName];
+        if (targetId && !aliveEnemyIds.has(targetId)) {
+            delete squadTargets[squadName];
         }
     }
 }
@@ -364,9 +408,10 @@ function executeSpawnStrategy(mySpawn, harvesters, attackers, medics) {
                 // Need medic to complete squad
                 mySpawn.spawnCreep([MOVE, MOVE, HEAL, HEAL]);
             } else {
-                // Spawn fast melee attackers with 1:1 MOVE ratio for maximum speed
-                // TOUGH at beginning to absorb damage first (damage applies from start of array)
-                mySpawn.spawnCreep([TOUGH, ATTACK, ATTACK, ATTACK, MOVE, MOVE, MOVE, MOVE]);
+                // Spawn resilient melee attackers with TOUGH parts at beginning
+                // Alternating ATTACK/MOVE spreads critical parts for gradual capability loss under fire
+                // TOUGH parts absorb initial damage (damage applies from start of array)
+                mySpawn.spawnCreep([TOUGH, TOUGH, ATTACK, MOVE, ATTACK, MOVE, ATTACK, MOVE]);
             }
         }
     }
@@ -563,6 +608,7 @@ function runAttackerBehavior(creep, mySpawn, enemySpawn, myCreeps) {
     if (isDeployed && enemySpawn) {
         const leader = getSquadLeader(creep, myCreeps);
         const isLeader = isSquadLeader(creep);
+        const allEnemies = getAllEnemyCreeps();
 
         // Check cohesion for followers
         if (!isLeader && leader) {
@@ -580,17 +626,42 @@ function runAttackerBehavior(creep, mySpawn, enemySpawn, myCreeps) {
             }
         }
 
-        // Leader behavior or follower in cohesion range
-        const nearbyEnemy = findNearestEnemy(creep, ATTACKER_ENEMY_DETECTION_RANGE);
+        // Leader designates target for the squad
+        if (isLeader) {
+            const currentTarget = getSquadTarget(creep, allEnemies);
 
-        if (nearbyEnemy) {
-            // Engage enemy creeps encountered on the way
-            if (creep.attack(nearbyEnemy) === ERR_NOT_IN_RANGE) {
-                cachedMoveTo(creep, nearbyEnemy, { ignoreCreeps: true });
+            // Keep current target if still valid and in detection range
+            if (!currentTarget || creep.getRangeTo(currentTarget) > ATTACKER_ENEMY_DETECTION_RANGE) {
+                // Find new target - prioritize nearest enemy
+                const nearbyEnemy = findNearestEnemy(creep, ATTACKER_ENEMY_DETECTION_RANGE);
+                setSquadTarget(creep, nearbyEnemy);
+            }
+        }
+
+        // All squad members attack the designated target
+        const designatedTarget = getSquadTarget(creep, allEnemies);
+
+        if (designatedTarget) {
+            const rangeToTarget = creep.getRangeTo(designatedTarget);
+
+            // Attack designated target if in range
+            if (rangeToTarget <= 1) {
+                creep.attack(designatedTarget);
+                // Move closer if not adjacent
+                if (rangeToTarget > 0) {
+                    cachedMoveTo(creep, designatedTarget, { ignoreCreeps: true });
+                }
+            } else {
+                // Designated target out of range - attack nearby enemy but move toward designated target
+                const nearbyEnemy = findNearestEnemy(creep, 1);
+                if (nearbyEnemy) {
+                    creep.attack(nearbyEnemy);
+                }
+                cachedMoveTo(creep, designatedTarget, { ignoreCreeps: true });
             }
         } else {
-            // No enemies nearby - check for enemies at spawn location before attacking spawn
-            const enemiesAtSpawn = getAllEnemyCreeps().filter(e =>
+            // No designated target - check for enemies at spawn location before attacking spawn
+            const enemiesAtSpawn = allEnemies.filter(e =>
                 e.x === enemySpawn.x && e.y === enemySpawn.y
             );
 
@@ -663,14 +734,16 @@ export function loop() {
     const mySpawn = getObjectsByPrototype(StructureSpawn).find(s => s.my);
     const enemySpawn = getObjectsByPrototype(StructureSpawn).find(s => !s.my);
     const myCreeps = getObjectsByPrototype(Creep).filter(c => c.my);
+    const enemyCreeps = getAllEnemyCreeps();
 
     cleanupDeadCreepState(myCreeps);
+    cleanupDeadTargets(enemyCreeps);
 
     // Categorize creeps by role
     const { harvesters, attackers, medics } = categorizeCreeps(myCreeps);
 
     manageExtensionConstruction(mySpawn, harvesters);
-    deployAttackWaves(attackers, medics);
+    deployAttackWaves(attackers, medics, mySpawn);
     manageBuildDefenses(mySpawn);
     executeSpawnStrategy(mySpawn, harvesters, attackers, medics);
     initializeTargetWalls(mySpawn);
