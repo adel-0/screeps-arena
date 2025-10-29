@@ -708,11 +708,19 @@ function runMedicBehavior(creep, mySpawn, myCreeps, enemySpawn) {
             }
         }
     } else {
-        // Base medic: heal friendlies and attack enemies in base area
-        const damagedCreep = myCreeps.find(c => c.hits < c.hitsMax);
+        // Undeployed medic: stay with assigned squad or defend base
+        const squad = squadAssignments[creep.id];
+        const squadmates = squad ? myCreeps.filter(c =>
+            c.id !== creep.id &&
+            squadAssignments[c.id] === squad &&
+            !killSquadCreeps.has(c.id)
+        ) : [];
+
+        // Priority 1: Heal damaged squadmates or any damaged friendlies (excluding kill squad)
+        const damagedSquadmate = findMostDamagedCreep(squadmates);
+        const damagedCreep = damagedSquadmate || myCreeps.find(c => c.hits < c.hitsMax && !killSquadCreeps.has(c.id));
 
         if (damagedCreep) {
-            // Priority 1: Heal damaged friendlies
             const rangeToTarget = creep.getRangeTo(damagedCreep);
 
             if (rangeToTarget <= 1) {
@@ -725,8 +733,14 @@ function runMedicBehavior(creep, mySpawn, myCreeps, enemySpawn) {
             if (rangeToTarget > 3) {
                 cachedMoveTo(creep, damagedCreep);
             }
+        } else if (squadmates.length > 0) {
+            // Priority 2: Follow assigned squadmates (prevents following kill squad)
+            const followTarget = creep.findClosestByRange(squadmates);
+            if (followTarget && creep.getRangeTo(followTarget) > MEDIC_FOLLOW_RANGE) {
+                cachedMoveTo(creep, followTarget);
+            }
         } else {
-            // Priority 2: Attack enemies near base
+            // Priority 3: Attack enemies near base or stay near spawn
             const enemyCreeps = getAllEnemyCreeps();
             const baseThreats = enemyCreeps.filter(e => e.getRangeTo(mySpawn) <= BASE_THREAT_DETECTION_RANGE);
 
@@ -787,14 +801,8 @@ function runKillSquadBehavior(creep, mySpawn, enemySpawn) {
         const rangeToSpawn = creep.getRangeTo(enemySpawn);
 
         if (rangeToSpawn <= 1) {
-            // At spawn - attack it or enemies on it
-            const enemiesAtSpawn = allEnemies.filter(e =>
-                e.x === enemySpawn.x && e.y === enemySpawn.y
-            );
-
-            if (enemiesAtSpawn.length > 0 && !nearbyEnemy) {
-                creep.attack(enemiesAtSpawn[0]);
-            } else if (!nearbyEnemy) {
+            // At spawn - prioritize destroying spawn structure over spawning enemies
+            if (!nearbyEnemy) {
                 creep.attack(enemySpawn);
             }
         } else {
@@ -882,20 +890,9 @@ function runAttackerBehavior(creep, mySpawn, enemySpawn, myCreeps) {
             // No designated target - prioritize spawn attack when in range
             const rangeToSpawn = creep.getRangeTo(enemySpawn);
 
-            // Check for enemies at spawn location
-            const enemiesAtSpawn = allEnemies.filter(e =>
-                e.x === enemySpawn.x && e.y === enemySpawn.y
-            );
-
             if (rangeToSpawn <= 1) {
-                // At spawn - prioritize attacking spawn or enemies on it
-                if (enemiesAtSpawn.length > 0) {
-                    // Enemy on spawn - attack the enemy
-                    creep.attack(enemiesAtSpawn[0]);
-                } else {
-                    // Attack the spawn structure directly
-                    creep.attack(enemySpawn);
-                }
+                // At spawn - prioritize destroying spawn structure to win the game
+                creep.attack(enemySpawn);
             } else {
                 // Not at spawn yet - check for threats while approaching
                 const nearbyEnemy = findNearestEnemy(creep, ATTACKER_ENEMY_DETECTION_RANGE, ATTACKER_HARMLESS_DETECTION_RANGE);
