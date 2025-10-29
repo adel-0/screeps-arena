@@ -40,8 +40,9 @@ const TARGET_HARVESTER_COUNT = 3;
 // Combat and Defense Ranges
 const BASE_THREAT_DETECTION_RANGE = 40; // Range to detect enemies near base
 const DEFENDER_IDLE_RANGE = 3; // Distance from spawn for idle defenders
-const ATTACKER_ENEMY_DETECTION_RANGE = 8; // Range for attackers to detect enemies
-const MEDIC_FOLLOW_RANGE = 3; // Max range before medic moves to follow assault force
+const ATTACKER_ENEMY_DETECTION_RANGE = 8; // Range for attackers to detect threats
+const ATTACKER_HARMLESS_DETECTION_RANGE = 4; // Range for attackers to detect harmless enemies
+const MEDIC_FOLLOW_RANGE = 2; // Max range before medic moves to follow assault force
 const SQUAD_COHESION_RANGE = 3; // Max distance followers can be from squad leader
 const HARVESTER_FLEE_RANGE = 10; // Range at which harvesters flee from enemies
 
@@ -51,6 +52,15 @@ const HARVESTER_FLEE_RANGE = 10; // Range at which harvesters flee from enemies
  */
 function getAllEnemyCreeps() {
     return getObjectsByPrototype(Creep).filter(c => !c.my);
+}
+
+/**
+ * Check if a creep has offensive capabilities
+ * @param {Creep} creep - The creep to check
+ * @returns {boolean} True if creep has attack or ranged attack parts
+ */
+function hasAttackCapability(creep) {
+    return creep.body.some(p => p.type === ATTACK || p.type === RANGED_ATTACK);
 }
 
 /**
@@ -67,26 +77,41 @@ function categorizeCreeps(myCreeps) {
 }
 
 /**
- * Find nearest enemy creep within specified range
+ * Find nearest enemy creep within specified range, prioritizing threats
  * @param {Creep} creep - The creep searching for enemies
- * @param {number} maxRange - Maximum distance to search
+ * @param {number} maxRange - Maximum distance to search for threats
+ * @param {number} maxHarmlessRange - Maximum distance to search for harmless enemies (defaults to maxRange)
  * @returns {Creep|null} Nearest enemy creep or null if none found
  */
-function findNearestEnemy(creep, maxRange) {
+function findNearestEnemy(creep, maxRange, maxHarmlessRange = null) {
     const enemyCreeps = getAllEnemyCreeps();
+    const harmlessRange = maxHarmlessRange !== null ? maxHarmlessRange : maxRange;
 
-    let nearestEnemy = null;
-    let minDistance = maxRange + 1;
+    let nearestThreat = null;
+    let nearestHarmless = null;
+    let minThreatDistance = maxRange + 1;
+    let minHarmlessDistance = harmlessRange + 1;
 
     for (const enemy of enemyCreeps) {
         const distance = creep.getRangeTo(enemy);
-        if (distance <= maxRange && distance < minDistance) {
-            minDistance = distance;
-            nearestEnemy = enemy;
+
+        if (hasAttackCapability(enemy)) {
+            // Check threats within their range
+            if (distance <= maxRange && distance < minThreatDistance) {
+                minThreatDistance = distance;
+                nearestThreat = enemy;
+            }
+        } else {
+            // Check harmless enemies within their (potentially shorter) range
+            if (distance <= harmlessRange && distance < minHarmlessDistance) {
+                minHarmlessDistance = distance;
+                nearestHarmless = enemy;
+            }
         }
     }
 
-    return nearestEnemy;
+    // Return nearest threat first, or harmless enemy if no threats
+    return nearestThreat || nearestHarmless;
 }
 
 /**
@@ -408,10 +433,10 @@ function executeSpawnStrategy(mySpawn, harvesters, attackers, medics) {
                 // Need medic to complete squad
                 mySpawn.spawnCreep([MOVE, MOVE, HEAL, HEAL]);
             } else {
-                // Spawn resilient melee attackers with TOUGH parts at beginning
-                // Alternating ATTACK/MOVE spreads critical parts for gradual capability loss under fire
-                // TOUGH parts absorb initial damage (damage applies from start of array)
-                mySpawn.spawnCreep([TOUGH, TOUGH, ATTACK, MOVE, ATTACK, MOVE, ATTACK, MOVE]);
+                // Spawn mobile melee attackers optimized for swamp terrain
+                // Extra MOVE parts at front absorb damage first, preserving ATTACK capability
+                // 5 MOVE parts for same speed as medics in swamp (moves every 3 ticks)
+                mySpawn.spawnCreep([MOVE, MOVE, MOVE, ATTACK, MOVE, ATTACK, MOVE, ATTACK]);
             }
         }
     }
@@ -657,7 +682,7 @@ function runAttackerBehavior(creep, mySpawn, enemySpawn, myCreeps) {
 
         // Leader designates target for the squad every tick (always picks nearest enemy)
         if (isLeader) {
-            const nearestEnemy = findNearestEnemy(creep, ATTACKER_ENEMY_DETECTION_RANGE);
+            const nearestEnemy = findNearestEnemy(creep, ATTACKER_ENEMY_DETECTION_RANGE, ATTACKER_HARMLESS_DETECTION_RANGE);
             setSquadTarget(creep, nearestEnemy);
         }
 
@@ -668,7 +693,7 @@ function runAttackerBehavior(creep, mySpawn, enemySpawn, myCreeps) {
             const rangeToDesignatedTarget = creep.getRangeTo(designatedTarget);
 
             // Check for any enemies in detection range
-            const nearestEnemy = findNearestEnemy(creep, ATTACKER_ENEMY_DETECTION_RANGE);
+            const nearestEnemy = findNearestEnemy(creep, ATTACKER_ENEMY_DETECTION_RANGE, ATTACKER_HARMLESS_DETECTION_RANGE);
 
             // Attack priority: designated target if in range, otherwise nearest accessible enemy
             if (rangeToDesignatedTarget <= 1) {
@@ -693,26 +718,41 @@ function runAttackerBehavior(creep, mySpawn, enemySpawn, myCreeps) {
                 cachedMoveTo(creep, designatedTarget, { ignoreCreeps: true });
             }
         } else {
-            // No designated target - check for enemies at spawn location before attacking spawn
-            const enemiesAtSpawn = allEnemies.filter(e =>
-                e.x === enemySpawn.x && e.y === enemySpawn.y
-            );
+            // No designated target - check for any nearby enemies first
+            const nearbyEnemy = findNearestEnemy(creep, ATTACKER_ENEMY_DETECTION_RANGE, ATTACKER_HARMLESS_DETECTION_RANGE);
 
-            if (enemiesAtSpawn.length > 0) {
-                // Enemy creep on spawn - attack the creep instead of spawn
-                const target = enemiesAtSpawn[0];
-                if (creep.attack(target) === ERR_NOT_IN_RANGE) {
-                    cachedMoveTo(creep, target, { ignoreCreeps: true });
+            if (nearbyEnemy) {
+                // Found a nearby enemy (even if harmless) - engage it
+                const rangeToEnemy = creep.getRangeTo(nearbyEnemy);
+
+                if (rangeToEnemy <= 1) {
+                    creep.attack(nearbyEnemy);
+                    // Don't move if already in attack range
+                } else {
+                    cachedMoveTo(creep, nearbyEnemy, { ignoreCreeps: true });
                 }
             } else {
-                // No enemies on spawn, attack the spawn structure
-                // Followers: move toward leader's position if leader exists, otherwise toward spawn
-                if (!isLeader && leader) {
-                    cachedMoveTo(creep, leader, { ignoreCreeps: true });
+                // No enemies nearby - check for enemies at spawn location before attacking spawn
+                const enemiesAtSpawn = allEnemies.filter(e =>
+                    e.x === enemySpawn.x && e.y === enemySpawn.y
+                );
+
+                if (enemiesAtSpawn.length > 0) {
+                    // Enemy creep on spawn - attack the creep instead of spawn
+                    const target = enemiesAtSpawn[0];
+                    if (creep.attack(target) === ERR_NOT_IN_RANGE) {
+                        cachedMoveTo(creep, target, { ignoreCreeps: true });
+                    }
                 } else {
-                    cachedMoveTo(creep, enemySpawn, { ignoreCreeps: true });
+                    // No enemies on spawn, attack the spawn structure
+                    // Followers: move toward leader's position if leader exists, otherwise toward spawn
+                    if (!isLeader && leader) {
+                        cachedMoveTo(creep, leader, { ignoreCreeps: true });
+                    } else {
+                        cachedMoveTo(creep, enemySpawn, { ignoreCreeps: true });
+                    }
+                    creep.attack(enemySpawn);
                 }
-                creep.attack(enemySpawn);
             }
         }
     } else {
