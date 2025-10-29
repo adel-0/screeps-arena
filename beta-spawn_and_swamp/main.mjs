@@ -23,7 +23,7 @@ const NATO_ALPHABET = [
  */
 
 // Configuration Constants
-const PATH_REFRESH_INTERVAL = 5; // Recalculate path every 5 ticks
+const PATH_REFRESH_INTERVAL = 3; // Recalculate path every 5 ticks
 const OFFPATH_DETECTION_THRESHOLD = 2; // Max tiles away from expected path position
 
 // Extension Construction
@@ -40,10 +40,10 @@ const TARGET_HARVESTER_COUNT = 3;
 // Combat and Defense Ranges
 const BASE_THREAT_DETECTION_RANGE = 40; // Range to detect enemies near base
 const DEFENDER_IDLE_RANGE = 3; // Distance from spawn for idle defenders
-const ATTACKER_ENEMY_DETECTION_RANGE = 5; // Range for attackers to detect enemies
-const MEDIC_FOLLOW_RANGE = 2; // Max range before medic moves to follow assault force
-const SQUAD_COHESION_RANGE = 4; // Max distance followers can be from squad leader
-const HARVESTER_FLEE_RANGE = 5; // Range at which harvesters flee from enemies
+const ATTACKER_ENEMY_DETECTION_RANGE = 8; // Range for attackers to detect enemies
+const MEDIC_FOLLOW_RANGE = 3; // Max range before medic moves to follow assault force
+const SQUAD_COHESION_RANGE = 3; // Max distance followers can be from squad leader
+const HARVESTER_FLEE_RANGE = 10; // Range at which harvesters flee from enemies
 
 /**
  * Get all enemy creeps
@@ -537,22 +537,15 @@ function runMedicBehavior(creep, mySpawn, myCreeps, enemySpawn) {
                     cachedMoveTo(creep, damagedSquadmate, { ignoreCreeps: true });
                 }
             } else {
-                // No wounded - follow leader and heal continuously
-                const healTarget = leader || squadmates[0];
+                // No wounded - follow leader to maintain formation
+                const followTarget = leader || squadmates[0];
 
-                if (healTarget) {
-                    const rangeToTarget = creep.getRangeTo(healTarget);
+                if (followTarget) {
+                    const rangeToTarget = creep.getRangeTo(followTarget);
 
-                    // Continuously heal even if undamaged - use appropriate heal based on range
-                    if (rangeToTarget <= 1) {
-                        creep.heal(healTarget);
-                    } else if (rangeToTarget <= 3) {
-                        creep.rangedHeal(healTarget);
-                    }
-
-                    // Follow the leader to maintain formation
+                    // Follow the leader to maintain formation (no healing needed)
                     if (rangeToTarget > MEDIC_FOLLOW_RANGE || rangeToTarget < 1) {
-                        cachedMoveTo(creep, healTarget, { ignoreCreeps: true });
+                        cachedMoveTo(creep, followTarget, { ignoreCreeps: true });
                     }
                 }
             }
@@ -563,10 +556,10 @@ function runMedicBehavior(creep, mySpawn, myCreeps, enemySpawn) {
             );
 
             if (otherDeployedCreeps.length > 0) {
-                const healTarget = findMostDamagedCreep(otherDeployedCreeps) ||
-                    creep.findClosestByRange(otherDeployedCreeps);
+                const healTarget = findMostDamagedCreep(otherDeployedCreeps);
 
                 if (healTarget) {
+                    // Only heal if target is actually damaged
                     const rangeToTarget = creep.getRangeTo(healTarget);
 
                     // Heal at appropriate range
@@ -578,6 +571,12 @@ function runMedicBehavior(creep, mySpawn, myCreeps, enemySpawn) {
 
                     if (rangeToTarget > MEDIC_FOLLOW_RANGE) {
                         cachedMoveTo(creep, healTarget, { ignoreCreeps: true });
+                    }
+                } else {
+                    // No damaged allies, follow nearest deployed creep
+                    const followTarget = creep.findClosestByRange(otherDeployedCreeps);
+                    if (followTarget && creep.getRangeTo(followTarget) > MEDIC_FOLLOW_RANGE) {
+                        cachedMoveTo(creep, followTarget, { ignoreCreeps: true });
                     }
                 }
             } else {
@@ -656,37 +655,41 @@ function runAttackerBehavior(creep, mySpawn, enemySpawn, myCreeps) {
             }
         }
 
-        // Leader designates target for the squad
+        // Leader designates target for the squad every tick (always picks nearest enemy)
         if (isLeader) {
-            const currentTarget = getSquadTarget(creep, allEnemies);
-
-            // Keep current target if still valid and in detection range
-            if (!currentTarget || creep.getRangeTo(currentTarget) > ATTACKER_ENEMY_DETECTION_RANGE) {
-                // Find new target - prioritize nearest enemy
-                const nearbyEnemy = findNearestEnemy(creep, ATTACKER_ENEMY_DETECTION_RANGE);
-                setSquadTarget(creep, nearbyEnemy);
-            }
+            const nearestEnemy = findNearestEnemy(creep, ATTACKER_ENEMY_DETECTION_RANGE);
+            setSquadTarget(creep, nearestEnemy);
         }
 
-        // All squad members attack the designated target
+        // All squad members coordinate on designated target but engage accessible enemies
         const designatedTarget = getSquadTarget(creep, allEnemies);
 
         if (designatedTarget) {
-            const rangeToTarget = creep.getRangeTo(designatedTarget);
+            const rangeToDesignatedTarget = creep.getRangeTo(designatedTarget);
 
-            // Attack designated target if in range
-            if (rangeToTarget <= 1) {
+            // Check for any enemies in detection range
+            const nearestEnemy = findNearestEnemy(creep, ATTACKER_ENEMY_DETECTION_RANGE);
+
+            // Attack priority: designated target if in range, otherwise nearest accessible enemy
+            if (rangeToDesignatedTarget <= 1) {
+                // Designated target in attack range - focus fire on it
                 creep.attack(designatedTarget);
-                // Move closer if not adjacent
-                if (rangeToTarget > 0) {
+                // Don't move if we're already attacking
+            } else if (nearestEnemy) {
+                // Designated target too far, but other enemies nearby - engage them
+                const rangeToNearest = creep.getRangeTo(nearestEnemy);
+
+                if (rangeToNearest <= 1) {
+                    // Attack the nearest enemy
+                    creep.attack(nearestEnemy);
+                }
+
+                // Move toward designated target for squad coordination (unless attacking adjacent enemy)
+                if (rangeToNearest > 1 || nearestEnemy.id === designatedTarget.id) {
                     cachedMoveTo(creep, designatedTarget, { ignoreCreeps: true });
                 }
             } else {
-                // Designated target out of range - attack nearby enemy but move toward designated target
-                const nearbyEnemy = findNearestEnemy(creep, 1);
-                if (nearbyEnemy) {
-                    creep.attack(nearbyEnemy);
-                }
+                // No enemies in detection range, move toward designated target
                 cachedMoveTo(creep, designatedTarget, { ignoreCreeps: true });
             }
         } else {
