@@ -524,13 +524,8 @@ function executeSpawnStrategy(mySpawn, harvesters, attackers, medics) {
     if (mySpawn && !mySpawn.spawning) {
         if (harvesters.length < ECONOMY_CONFIG.TARGET_HARVESTER_COUNT) {
             // Phase 1: Build economy with harvesters
-            // First harvester: cheap 2C2M for early bootstrap
-            // Subsequent harvesters: efficient 3C3M for better throughput
-            if (harvesters.length === 0) {
-                mySpawn.spawnCreep([CARRY, CARRY, MOVE, MOVE]);
-            } else {
-                mySpawn.spawnCreep([CARRY, CARRY, MOVE, MOVE]);
-            }
+            // Lightweight 1C1M harvesters for minimal cost
+            mySpawn.spawnCreep([CARRY, MOVE]);
         } else {
             // Phase 2: Spawn kill squad first (2 fast strikers with 4M2A)
             const killSquadMemberCount = attackers.filter(a => {
@@ -559,8 +554,8 @@ function executeSpawnStrategy(mySpawn, harvesters, attackers, medics) {
                 } else {
                     // Spawn mobile melee attackers optimized for swamp terrain
                     // Extra MOVE parts at front absorb damage first, preserving ATTACK capability
-                    // 5 MOVE parts for same speed as medics in swamp (moves every 3 ticks)
-                    mySpawn.spawnCreep([MOVE, MOVE, ATTACK, MOVE, ATTACK, MOVE, ATTACK]);
+                    // 6 MOVE, 6 ATTACK for balanced combat power and mobility
+                    mySpawn.spawnCreep([MOVE, MOVE, ATTACK, MOVE, ATTACK, MOVE, ATTACK, MOVE, ATTACK, ATTACK, ATTACK]);
                 }
             }
         }
