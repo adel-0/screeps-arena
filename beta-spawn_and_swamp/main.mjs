@@ -877,13 +877,41 @@ function runAttackerBehavior(creep, mySpawn, enemySpawn, myCreeps) {
         const leader = getSquadLeader(creep, myCreeps);
         const isLeader = isSquadLeader(creep);
         const allEnemies = getAllEnemyCreeps();
+        const squadmates = isLeader ? getSquadMembers(creep, myCreeps, true) : null;
+        const cohesionRange = COMBAT_CONFIG.SQUAD_COHESION_RANGE;
+        let rangeToLeader = null;
+
+        if (isLeader && squadmates && squadmates.length > 0) {
+            let farthestMate = null;
+            let maxRange = 0;
+
+            for (const mate of squadmates) {
+                const dist = creep.getRangeTo(mate);
+                if (dist > maxRange) {
+                    maxRange = dist;
+                    farthestMate = mate;
+                }
+            }
+
+            if (maxRange > cohesionRange + 1) {
+                if (farthestMate) {
+                    cachedMoveTo(creep, farthestMate, { ignoreCreeps: true });
+                }
+                const nearbyEnemy = findNearestEnemy(creep, 1);
+                if (nearbyEnemy) {
+                    creep.attack(nearbyEnemy);
+                }
+                return;
+            }
+        }
 
         // Check cohesion for followers
         if (!isLeader && leader) {
-            const rangeToLeader = creep.getRangeTo(leader);
+            rangeToLeader = creep.getRangeTo(leader);
+            const followerStickRange = Math.max(1, cohesionRange - 1);
 
             // If too far from leader, prioritize returning to formation
-            if (rangeToLeader > COMBAT_CONFIG.SQUAD_COHESION_RANGE) {
+            if (rangeToLeader > followerStickRange) {
                 cachedMoveTo(creep, leader, { ignoreCreeps: true });
                 // Still attack nearby enemies while regrouping
                 const nearbyEnemy = findNearestEnemy(creep, 1);
@@ -902,6 +930,20 @@ function runAttackerBehavior(creep, mySpawn, enemySpawn, myCreeps) {
 
         // All squad members coordinate on designated target but engage accessible enemies
         const designatedTarget = getSquadTarget(creep, allEnemies);
+
+        if (!isLeader && leader && designatedTarget) {
+            const leaderToTarget = leader.getRangeTo(designatedTarget);
+            const followerToTarget = creep.getRangeTo(designatedTarget);
+            const currentLeaderRange = rangeToLeader !== null ? rangeToLeader : creep.getRangeTo(leader);
+
+            if (followerToTarget + 1 < leaderToTarget && currentLeaderRange >= 2) {
+                cachedMoveTo(creep, leader, { ignoreCreeps: true });
+                if (followerToTarget <= 1) {
+                    creep.attack(designatedTarget);
+                }
+                return;
+            }
+        }
 
         if (designatedTarget) {
             const rangeToDesignatedTarget = creep.getRangeTo(designatedTarget);
