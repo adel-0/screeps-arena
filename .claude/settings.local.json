@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "WebFetch(domain:docs.screeps.com)",
+      "WebFetch(domain:arena.screeps.com)"
     ],
     "deny": [],
     "ask": []

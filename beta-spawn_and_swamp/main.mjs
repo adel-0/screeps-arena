@@ -808,12 +808,6 @@ function runKillSquadBehavior(creep, mySpawn, enemySpawn) {
 
     const allEnemies = getAllEnemyCreeps();
 
-    // Priority 1: Attack adjacent enemies while moving
-    const nearbyEnemy = findNearestEnemy(creep, 1);
-    if (nearbyEnemy) {
-        creep.attack(nearbyEnemy);
-    }
-
     // Check if this creep has reached the waypoint
     const hasReachedWaypoint = killSquadReachedWaypoint.has(creep.id);
     const rangeToWaypoint = creep.getRangeTo(killSquadWaypoint);
@@ -823,9 +817,16 @@ function runKillSquadBehavior(creep, mySpawn, enemySpawn) {
         killSquadReachedWaypoint.add(creep.id);
     }
 
+    // Detect enemies on path - threats and harmless enemies with same ranges as regular attackers
+    const nearbyEnemy = findNearestEnemy(creep, COMBAT_CONFIG.ATTACKER_ENEMY_DETECTION_RANGE, COMBAT_CONFIG.ATTACKER_HARMLESS_DETECTION_RANGE);
+
     // Two-stage pathfinding: go to waypoint, then to spawn
     if (!hasReachedWaypoint && rangeToWaypoint > 3) {
         // Stage 1: Move to waypoint
+        // Engage enemies on path if close enough
+        if (nearbyEnemy && creep.getRangeTo(nearbyEnemy) <= 1) {
+            creep.attack(nearbyEnemy);
+        }
         cachedMoveTo(creep, killSquadWaypoint, { ignoreCreeps: true });
     } else {
         // Stage 2: Move to enemy spawn
@@ -833,11 +834,16 @@ function runKillSquadBehavior(creep, mySpawn, enemySpawn) {
 
         if (rangeToSpawn <= 1) {
             // At spawn - prioritize destroying spawn structure over spawning enemies
-            if (!nearbyEnemy) {
+            if (!nearbyEnemy || creep.getRangeTo(nearbyEnemy) > 1) {
                 creep.attack(enemySpawn);
+            } else {
+                creep.attack(nearbyEnemy);
             }
         } else {
-            // Move toward enemy spawn
+            // Move toward enemy spawn, attacking enemies on path
+            if (nearbyEnemy && creep.getRangeTo(nearbyEnemy) <= 1) {
+                creep.attack(nearbyEnemy);
+            }
             cachedMoveTo(creep, enemySpawn, { ignoreCreeps: true });
         }
     }
