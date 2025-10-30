@@ -45,6 +45,9 @@ const ECONOMY_CONFIG = {
 const COMBAT_CONFIG = {
     ATTACKERS_PER_SQUAD: 3,
     MEDICS_PER_SQUAD: 1,
+    INITIAL_WAVE_ATTACKERS: 4, // First two waves have 4 attackers
+    FOLLOWUP_WAVE_ATTACKERS: 2, // Subsequent waves have 2 attackers
+    INITIAL_WAVE_COUNT: 2, // Number of initial waves with 4 attackers
     KILL_SQUAD_SIZE: 2, // Fast strike team
     BASE_THREAT_DETECTION_RANGE: 40, // Range to detect enemies near base
     DEFENDER_IDLE_RANGE: 3, // Distance from spawn for idle defenders
@@ -462,12 +465,17 @@ function deployAttackWaves(attackers, medics, mySpawn) {
     const undeployedAttackers = attackers.filter(a => !deployedAttackers.has(a.id) && !killSquadCreeps.has(a.id));
     const undeployedMedics = medics.filter(d => !deployedMedics.has(d.id));
 
+    // Determine squad size based on wave number
+    const attackersNeeded = nextSquadIndex < COMBAT_CONFIG.INITIAL_WAVE_COUNT
+        ? COMBAT_CONFIG.INITIAL_WAVE_ATTACKERS
+        : COMBAT_CONFIG.FOLLOWUP_WAVE_ATTACKERS;
+
     // Deploy complete squads only when we have enough units
-    if (undeployedAttackers.length >= COMBAT_CONFIG.ATTACKERS_PER_SQUAD && undeployedMedics.length >= COMBAT_CONFIG.MEDICS_PER_SQUAD) {
+    if (undeployedAttackers.length >= attackersNeeded && undeployedMedics.length >= COMBAT_CONFIG.MEDICS_PER_SQUAD) {
         const squadName = NATO_ALPHABET[nextSquadIndex % NATO_ALPHABET.length];
 
         // Deploy attackers - first one becomes squad leader
-        for (let i = 0; i < COMBAT_CONFIG.ATTACKERS_PER_SQUAD; i++) {
+        for (let i = 0; i < attackersNeeded; i++) {
             const attacker = undeployedAttackers[i];
             deployedAttackers.add(attacker.id);
             squadAssignments[attacker.id] = squadName;
@@ -536,11 +544,16 @@ function executeSpawnStrategy(mySpawn, harvesters, attackers, medics) {
                 // Optimized for speed through swamps, takes alternate route
                 mySpawn.spawnCreep([MOVE, MOVE, MOVE, MOVE, ATTACK, ATTACK]);
             } else {
-                // Phase 3: Build squads - maintain ratio of 3 attackers per 1 medic
+                // Phase 3: Build squads - maintain appropriate ratio based on wave number
                 const undeployedAttackers = attackers.filter(a => !deployedAttackers.has(a.id) && !killSquadCreeps.has(a.id));
                 const undeployedMedics = medics.filter(m => !deployedMedics.has(m.id));
 
-                if (undeployedAttackers.length >= COMBAT_CONFIG.ATTACKERS_PER_SQUAD && undeployedMedics.length < COMBAT_CONFIG.MEDICS_PER_SQUAD) {
+                // Determine required attackers for next squad
+                const attackersNeeded = nextSquadIndex < COMBAT_CONFIG.INITIAL_WAVE_COUNT
+                    ? COMBAT_CONFIG.INITIAL_WAVE_ATTACKERS
+                    : COMBAT_CONFIG.FOLLOWUP_WAVE_ATTACKERS;
+
+                if (undeployedAttackers.length >= attackersNeeded && undeployedMedics.length < COMBAT_CONFIG.MEDICS_PER_SQUAD) {
                     // Need medic to complete squad
                     mySpawn.spawnCreep([MOVE, HEAL, MOVE]);
                 } else {
